@@ -18,6 +18,7 @@
 const fs = require('fs');
 const path = require('path');
 const { execSync } = require('child_process');
+const readline = require('readline');
 const matter = require('gray-matter');
 const yaml = require('js-yaml');
 const { generateConfig } = require('./puppeteer-config');
@@ -104,6 +105,77 @@ function checkDeepHeadings(content) {
 // =========================================================================
 // 5. Mermaid 渲染
 // =========================================================================
+
+// 检测 mermaid 中可能导致渲染失败的特殊字符
+function detectMermaidIssues(code) {
+  const issues = [];
+  const lines = code.split('\n');
+  lines.forEach((line, idx) => {
+    // 检测 sequenceDiagram 消息行中的特殊字符
+    if (line.includes('->>') || line.includes('-->>')) {
+      const msgMatch = line.match(/:\s*(.+)/);
+      if (msgMatch) {
+        const msg = msgMatch[1].trim();
+        // 检测消息中的中文冒号
+        if (msg.includes('：')) {
+          issues.push({ line: idx + 1, text: line.trim(), reason: '中文冒号' });
+        }
+        // 检测消息中的括号（可能导致解析错误）
+        if (/\(.*[：;].*\)/.test(msg)) {
+          issues.push({ line: idx + 1, text: line.trim(), reason: '括号内特殊字符' });
+        }
+      }
+    }
+    // 检测 loop/alt/opt 等语句中的分号
+    if (/^\s*(loop|alt|opt)\s+.*;/.test(line)) {
+      issues.push({ line: idx + 1, text: line.trim(), reason: 'loop/alt/opt 语句中的分号' });
+    }
+    // 检测 flowchart 节点文本中的双引号
+    if (/\[.*".*\]/.test(line)) {
+      issues.push({ line: idx + 1, text: line.trim(), reason: 'flowchart 节点文本中的双引号' });
+    }
+  });
+  return issues;
+}
+
+// 自动修复 mermaid 中的特殊字符
+function fixMermaidCode(code) {
+  return code.split('\n').map(line => {
+    // sequenceDiagram 消息行
+    if ((line.includes('->>') || line.includes('-->>')) && line.includes(':')) {
+      const colonIdx = line.indexOf(':');
+      const prefix = line.slice(0, colonIdx + 1);
+      let msg = line.slice(colonIdx + 1).trim();
+      // 把消息中的 ; 替换为中文 ；，避免 Mermaid 解析为分隔符
+      msg = msg.replace(/;/g, '；');
+      return `${prefix} ${msg}`;
+    }
+    // 修复 loop/alt/opt 语句中的分号
+    if (/^\s*(loop|alt|opt)\s+.*;/.test(line)) {
+      return line.replace(/;/g, '；');
+    }
+    // 修复 flowchart 节点文本中的双引号
+    if (/\[.*".*\]/.test(line)) {
+      return line.replace(/"/g, '');
+    }
+    return line;
+  }).join('\n');
+}
+
+// 交互式询问用户
+function askUser(question) {
+  return new Promise((resolve) => {
+    const rl = readline.createInterface({
+      input: process.stdin,
+      output: process.stdout,
+    });
+    rl.question(question, (answer) => {
+      rl.close();
+      resolve(answer.trim().toLowerCase());
+    });
+  });
+}
+
 function renderMermaidBlocks(content, inputDir, baseName) {
   const mermaidDir = path.join(inputDir, 'output', '.mermaid');
   if (!fs.existsSync(mermaidDir)) fs.mkdirSync(mermaidDir, { recursive: true });
@@ -115,6 +187,7 @@ function renderMermaidBlocks(content, inputDir, baseName) {
 
   while (i < lines.length) {
     if (lines[i].match(/^```mermaid\s*$/i)) {
+      const mermaidStartLine = i + 1; // 记录 mermaid 代码块在原始文件中的起始行号（1-based）
       const mermaidLines = [];
       i++;
       while (i < lines.length && !lines[i].match(/^```\s*$/)) {
@@ -123,7 +196,7 @@ function renderMermaidBlocks(content, inputDir, baseName) {
       }
       i++; // skip closing ```
 
-      const mermaidCode = mermaidLines.join('\n');
+      let mermaidCode = mermaidLines.join('\n');
       figureIndex++;
 
       const pngName = `${baseName}_fig${figureIndex}.png`;
@@ -131,6 +204,7 @@ function renderMermaidBlocks(content, inputDir, baseName) {
       const mmdPath = path.join(mermaidDir, `${baseName}_fig${figureIndex}.mmd`);
 
       let rendered = false;
+      let retryWithFix = false;
       try {
         fs.writeFileSync(mmdPath, mermaidCode);
         const cfgPath = generateConfig(mermaidDir);
@@ -143,7 +217,54 @@ function renderMermaidBlocks(content, inputDir, baseName) {
         );
         rendered = fs.existsSync(pngPath);
       } catch (e) {
-        console.warn(`  [mermaid] 渲染失败 (图${figureIndex}): ${e.message}`);
+        console.warn(`\n  [mermaid] 渲染失败 (图${figureIndex}): ${e.message}`);
+        const issues = detectMermaidIssues(mermaidCode);
+        if (issues.length > 0) {
+          console.warn(`  [mermaid] 检测到可能的语法问题:`);
+          issues.forEach(issue => {
+            const originalLine = mermaidStartLine + issue.line - 1;
+            console.warn(`    原始文件第 ${originalLine} 行: ${issue.reason}`);
+            console.warn(`      ${issue.text}`);
+          });
+          retryWithFix = true;
+        }
+      }
+
+      // 如果检测到问题，询问用户是否自动修复
+      if (!rendered && retryWithFix) {
+        // 使用同步方式询问（因为我们在 while 循环中）
+        const fixedCode = fixMermaidCode(mermaidCode);
+        console.warn(`\n  [mermaid] 建议修复方案:`);
+        // 找到有问题的行用于展示
+        const originalLines = mermaidCode.split('\n');
+        const fixedLines = fixedCode.split('\n');
+        const issueLineIdx = originalLines.findIndex(l =>
+          l.includes('->>') || l.includes('-->>') || /\[.*".*\]/.test(l)
+        );
+        if (issueLineIdx >= 0) {
+          console.warn(`    原始: ${originalLines[issueLineIdx].trim()}`);
+          console.warn(`    修复: ${fixedLines[issueLineIdx].trim()}`);
+        } else {
+          console.warn(`    (多行修复)`);
+        }
+        // 由于 Node.js 的异步限制，这里直接尝试修复而不是询问
+        console.warn(`  [mermaid] 自动尝试修复并重新渲染...`);
+        try {
+          fs.writeFileSync(mmdPath, fixedCode);
+          const cfgPath = generateConfig(mermaidDir);
+          const cfgArg = cfgPath ? `-p ${cfgPath}` : '';
+          const mmdcDir = path.resolve(__dirname, '..');
+          execSync(
+            `npx mmdc -i "${mmdPath}" -o "${pngPath}" -b white -w 1600 -H 900 ${cfgArg}`,
+            { stdio: 'pipe', timeout: 30000, cwd: mmdcDir }
+          );
+          rendered = fs.existsSync(pngPath);
+          if (rendered) {
+            console.warn(`  [mermaid] 修复成功，图${figureIndex} 已渲染`);
+          }
+        } catch (e2) {
+          console.warn(`  [mermaid] 修复后仍失败: ${e2.message}`);
+        }
       }
 
       if (rendered) {
