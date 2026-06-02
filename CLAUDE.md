@@ -4,13 +4,19 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-md2docx is a Markdown-to-DOCX converter that produces Chinese technical documents conforming to the 《技术文档格式-20260525》 specification. It converts `.md` files with YAML front matter into Word documents with cover page, table of contents, and styled body sections.
+md2docx is a Markdown-to-DOCX converter for Chinese technical documents conforming to the 《技术文档格式-20260525》specification. It converts `.md` files with YAML front matter into Word documents with cover page, table of contents, and styled body sections.
 
 ## Commands
 
 ```bash
-# Full conversion pipeline: preprocess then convert
+# Install dependencies (run once)
+npm install
+
+# Full pipeline: preprocess then convert a single file
 node scripts/preprocess.js md/input.md && node scripts/md2docx.js md/output/clean/input.clean.md
+
+# Or use the shell wrapper (recommended for batch processing)
+./scripts/md2docx.sh md/input.md
 
 # Preprocess only (fixes YAML, strips heading numbers, renders mermaid, marks captions)
 node scripts/preprocess.js md/input.md
@@ -18,7 +24,7 @@ node scripts/preprocess.js md/input.md
 # Convert preprocessed markdown to DOCX
 node scripts/md2docx.js md/output/clean/input.clean.md
 
-# Generate a blank template DOCX (reference only, uses hardcoded content)
+# Generate a blank template DOCX (reference only, hardcoded sample content)
 node scripts/build_template.js
 ```
 

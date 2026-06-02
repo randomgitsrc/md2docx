@@ -5,6 +5,25 @@
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 
+# Ensure dependencies are installed (idempotent)
+if [ ! -d "$PROJECT_DIR/node_modules" ]; then
+  echo "node_modules not found. Install dependencies now? [Y/n]"
+  read -r answer < /dev/tty
+  if [[ -z "$answer" || "$answer" =~ ^[Yy]$ ]]; then
+    echo "=== Installing dependencies ==="
+    (cd "$PROJECT_DIR" && npm install) || { echo "npm install failed"; exit 1; }
+  else
+    echo "Dependencies not installed. Exiting."
+    exit 1
+  fi
+fi
+
+# Check Node.js is available
+if ! command -v node >/dev/null 2>&1; then
+  echo "ERROR: Node.js is not installed or not in PATH"
+  exit 1
+fi
+
 usage() {
   cat <<'EOF'
 Usage: md2docx.sh [OPTIONS] <input.md> [input2.md ...]

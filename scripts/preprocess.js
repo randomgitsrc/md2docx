@@ -180,8 +180,8 @@ function renderMermaidBlocks(content, inputDir, baseName) {
 // 需要剥掉手动编号前缀，让 Word 自动编号接管
 function stripBulletManualNumbers(content) {
   return content.split('\n').map(line => {
-    // 匹配: `- a) xxx` / `- (1) xxx` / `- (2) xxx` 等模式
-    const m = line.match(/^(\s{0,6})[-*]\s+([a-z]\)|\(\d+\))\s+(.+)$/);
+    // 匹配: `- a) xxx` / `- (1) xxx` / `- 1) xxx` / `- A) xxx` 等模式
+    const m = line.match(/^(\s{0,6})[-*]\s+([a-zA-Z]\)|\(\d+\)|\d+\))\s+(.+)$/);
     if (m) return `${m[1]}- ${m[3]}`;
     return line;
   }).join('\n');
@@ -251,6 +251,8 @@ function main() {
 
   raw = stripHeadingNumbers(raw);
   console.log('[preprocess] 2. 标题自带编号已剥离');
+
+  raw = checkDeepHeadings(raw);
 
   raw = renderMermaidBlocks(raw, inputDir, baseName);
   console.log('[preprocess] 3. Mermaid 图表已渲染');
