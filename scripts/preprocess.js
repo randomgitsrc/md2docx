@@ -212,7 +212,7 @@ function renderMermaidBlocks(content, inputDir, baseName) {
         // 从 md2docx 项目目录执行 npx，确保能找到 mermaid-cli 依赖
         const mmdcDir = path.resolve(__dirname, '..');
         execSync(
-          `npx mmdc -i "${mmdPath}" -o "${pngPath}" -b white -w 1600 -H 900 ${cfgArg}`,
+          `npx mmdc -i "${mmdPath}" -o "${pngPath}" -b white -w 3600 -H 2400 ${cfgArg}`,
           { stdio: 'pipe', timeout: 30000, cwd: mmdcDir }
         );
         rendered = fs.existsSync(pngPath);

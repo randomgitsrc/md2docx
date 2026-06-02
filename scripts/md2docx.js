@@ -172,7 +172,7 @@ function renderMermaid(mermaidCode, tmpDir, index) {
 
   fs.writeFileSync(inFile, mermaidCode);
   const mmdcDir = path.resolve(__dirname, '..');
-  execSync(`npx mmdc -i ${inFile} -o ${outFile} -b white -w 1600 -H 900 ${cfgArg}`,
+  execSync(`npx mmdc -i ${inFile} -o ${outFile} -b white -w 3600 -H 2400 ${cfgArg}`,
     { stdio: 'pipe', cwd: mmdcDir });
 
   // 读出 PNG,顺便取宽高用于 docx 嵌入时计算缩放
@@ -185,7 +185,21 @@ function renderMermaid(mermaidCode, tmpDir, index) {
 
 // 图片按页面内容区等比缩放,超宽超高都限制
 const CONTENT_WIDTH_PX = Math.round(CONTENT_WIDTH / 566.93 / 2.54 * 96);
-const CONTENT_HEIGHT_PX = Math.round((29.7 - 2.54 - 2.54) * 0.80 / 2.54 * 96);
+const CONTENT_HEIGHT_PX = Math.round((29.7 - 2.54 - 2.54) * 0.90 / 2.54 * 96);
+
+// 横置页面参数
+const LANDSCAPE_PAGE = {
+  width:  cm(29.7),
+  height: cm(21),
+  marginTop:    cm(2.54),
+  marginBottom: cm(2.54),
+  marginLeft:   cm(2.7),
+  marginRight:  cm(2.7),
+};
+const LANDSCAPE_CONTENT_WIDTH  = LANDSCAPE_PAGE.width  - LANDSCAPE_PAGE.marginLeft - LANDSCAPE_PAGE.marginRight;
+const LANDSCAPE_CONTENT_HEIGHT = LANDSCAPE_PAGE.height - LANDSCAPE_PAGE.marginTop  - LANDSCAPE_PAGE.marginBottom;
+const LANDSCAPE_CONTENT_WIDTH_PX  = Math.round(LANDSCAPE_CONTENT_WIDTH  / 566.93 / 2.54 * 96);
+const LANDSCAPE_CONTENT_HEIGHT_PX = Math.round(LANDSCAPE_CONTENT_HEIGHT / 566.93 / 2.54 * 96);
 
 function fitImageToPage(origW, origH) {
   let w = origW, h = origH;
@@ -197,6 +211,21 @@ function fitImageToPage(origW, origH) {
   if (h > CONTENT_HEIGHT_PX) {
     const r = CONTENT_HEIGHT_PX / h;
     h = CONTENT_HEIGHT_PX;
+    w = Math.round(w * r);
+  }
+  return { width: w, height: h };
+}
+
+function fitImageToLandscape(origW, origH) {
+  let w = origW, h = origH;
+  if (w > LANDSCAPE_CONTENT_WIDTH_PX) {
+    const r = LANDSCAPE_CONTENT_WIDTH_PX / w;
+    w = LANDSCAPE_CONTENT_WIDTH_PX;
+    h = Math.round(origH * r);
+  }
+  if (h > LANDSCAPE_CONTENT_HEIGHT_PX) {
+    const r = LANDSCAPE_CONTENT_HEIGHT_PX / h;
+    h = LANDSCAPE_CONTENT_HEIGHT_PX;
     w = Math.round(w * r);
   }
   return { width: w, height: h };
@@ -220,8 +249,30 @@ class Md2DocxConverter {
     this.imageIndex = 0;
     // 列表 reference 池索引
     this.listPoolIndex = 0;
-    // 输出元素累积
-    this.bodyChildren = [];
+    // 分段结构
+    this.sections = [];
+    this.currentSection = null;
+    this.pendingLandscapeClose = false;
+    this.startPortraitSection();
+  }
+
+  // 开启新的竖置 section
+  startPortraitSection() {
+    const sec = { orientation: 'portrait', children: [] };
+    this.sections.push(sec);
+    this.currentSection = sec;
+  }
+
+  // 开启新的横置 section
+  startLandscapeSection() {
+    const sec = { orientation: 'landscape', children: [] };
+    this.sections.push(sec);
+    this.currentSection = sec;
+  }
+
+  // 恢复竖置 section
+  resumePortraitSection() {
+    this.startPortraitSection();
   }
 
   // 为一组(顶层)列表分配一组新的 l1/l2/l3 reference,使编号从 1 重新开始
@@ -247,11 +298,48 @@ class Md2DocxConverter {
     while (i < tokens.length) {
       i = this.consumeToken(tokens, i);
     }
-    return this.bodyChildren;
+    return this.sections;
   }
 
   // 处理一个块级 token,返回下一个待处理的 index
   consumeToken(tokens, i) {
+    // 延迟恢复机制：检查 pendingLandscapeClose
+    if (this.pendingLandscapeClose) {
+      const t = tokens[i];
+      const isCaption = t.type === 'paragraph_open' && tokens[i + 1] && tokens[i + 1].children;
+      if (isCaption) {
+        const inline = tokens[i + 1];
+        const children = inline.children;
+        let first = 0, last = children.length - 1;
+        while (first < last && children[first].type === 'text' && !children[first].content) first++;
+        while (last > first && children[last].type === 'text' && !children[last].content) last--;
+        const isAllBoldWrapped =
+          first < last &&
+          children[first].type === 'strong_open' &&
+          children[last].type === 'strong_close';
+        const fullText = this.flattenInlineToText(inline);
+        const captionMatch = fullText.match(/^[图表]\s+\S/);
+        if (isAllBoldWrapped && captionMatch && fullText.length < 60) {
+          // 是 Caption，push 到 currentSection（landscape），然后恢复竖置
+          const captionPara = new Paragraph({
+            style: 'Caption',
+            children: [new TextRun({
+              text: fullText,
+              ...runFont(FONT.黑体, SIZE.小四),
+            })],
+          });
+          this.currentSection.children.push(captionPara);
+          this.pendingLandscapeClose = false;
+          this.resumePortraitSection();
+          return i + 3;
+        }
+      }
+      // 不是 Caption，直接恢复竖置
+      this.pendingLandscapeClose = false;
+      this.resumePortraitSection();
+      // 继续执行当前 token 的正常处理
+    }
+
     const t = tokens[i];
 
     switch (t.type) {
@@ -261,13 +349,13 @@ class Md2DocxConverter {
         const inline = tokens[i + 1];
         const text = this.flattenInlineToText(inline);
         if (wordLevel >= 1 && wordLevel <= 5) {
-          this.bodyChildren.push(new Paragraph({
+          this.currentSection.children.push(new Paragraph({
             style: `Heading${wordLevel}`,
             numbering: { reference: 'heading-numbering', level: wordLevel - 1 },
             children: [new TextRun({ text })],
           }));
         } else {
-          this.bodyChildren.push(new Paragraph({
+          this.currentSection.children.push(new Paragraph({
             style: 'Heading1',
             numbering: { reference: 'heading-numbering', level: 0 },
             children: [new TextRun({ text })],
@@ -315,12 +403,12 @@ class Md2DocxConverter {
                 ...runFont(FONT.黑体, SIZE.小四),
               })],
             });
-            this.bodyChildren.push(captionPara);
+            this.currentSection.children.push(captionPara);
             return i + 3;
           }
         }
         const runs = this.inlineToRuns(inline);
-        this.bodyChildren.push(new Paragraph({
+        this.currentSection.children.push(new Paragraph({
           style: 'Normal',
           children: runs,
         }));
@@ -494,7 +582,7 @@ class Md2DocxConverter {
     const imgPath = path.resolve(this.inputDir, decodedSrc);
     if (!fs.existsSync(imgPath)) {
       console.warn(`  [md2docx] 图片未找到: ${imgPath}，降级为文字`);
-      this.bodyChildren.push(new Paragraph({
+      this.currentSection.children.push(new Paragraph({
         alignment: AlignmentType.CENTER, indent: { firstLine: 0 },
         children: [new TextRun({ text: `[图片缺失: ${src}]`, ...runFont(FONT.仿宋, SIZE.小四) })],
       }));
@@ -508,18 +596,37 @@ class Md2DocxConverter {
         origH = buf.readUInt32BE(20);
       }
     } catch (_) {}
-    const { width: w, height: h } = fitImageToPage(origW, origH);
 
-    this.bodyChildren.push(new Paragraph({
-      alignment: AlignmentType.CENTER, indent: { firstLine: 0 },
-      keepNext: true,
-      spacing: { before: 120, after: 60 },
-      children: [new ImageRun({
-        type: 'png',
-        data: buf,
-        transformation: { width: w, height: h },
-      })],
-    }));
+    const aspectRatio = origW / origH;
+    const isLandscape = aspectRatio > 1.5;
+
+    if (isLandscape) {
+      this.startLandscapeSection();
+      const { width: w, height: h } = fitImageToLandscape(origW, origH);
+      this.currentSection.children.push(new Paragraph({
+        alignment: AlignmentType.CENTER, indent: { firstLine: 0 },
+        keepNext: true,
+        spacing: { before: 120, after: 60 },
+        children: [new ImageRun({
+          type: 'png',
+          data: buf,
+          transformation: { width: w, height: h },
+        })],
+      }));
+      this.pendingLandscapeClose = true;
+    } else {
+      const { width: w, height: h } = fitImageToPage(origW, origH);
+      this.currentSection.children.push(new Paragraph({
+        alignment: AlignmentType.CENTER, indent: { firstLine: 0 },
+        keepNext: true,
+        spacing: { before: 120, after: 60 },
+        children: [new ImageRun({
+          type: 'png',
+          data: buf,
+          transformation: { width: w, height: h },
+        })],
+      }));
+    }
     this.imageIndex += 1;
   }
 
@@ -551,19 +658,38 @@ class Md2DocxConverter {
       return;
     }
     // 自适应缩放:横图填满正文区,纵图按最大宽度等比
-    const { width, height } = fitImageToPage(img.width, img.height);
+    const aspectRatio = img.width / img.height;
+    const isLandscape = aspectRatio > 1.5;
 
-    this.bodyChildren.push(new Paragraph({
-      alignment: AlignmentType.CENTER,
-      indent: { firstLine: 0 },
-      keepNext: true,
-      spacing: { before: 120, after: 60 },
-      children: [new ImageRun({
-        type: 'png',
-        data: img.buffer,
-        transformation: { width, height },
-      })],
-    }));
+    if (isLandscape) {
+      this.startLandscapeSection();
+      const { width, height } = fitImageToLandscape(img.width, img.height);
+      this.currentSection.children.push(new Paragraph({
+        alignment: AlignmentType.CENTER,
+        indent: { firstLine: 0 },
+        keepNext: true,
+        spacing: { before: 120, after: 60 },
+        children: [new ImageRun({
+          type: 'png',
+          data: img.buffer,
+          transformation: { width, height },
+        })],
+      }));
+      this.pendingLandscapeClose = true;
+    } else {
+      const { width, height } = fitImageToPage(img.width, img.height);
+      this.currentSection.children.push(new Paragraph({
+        alignment: AlignmentType.CENTER,
+        indent: { firstLine: 0 },
+        keepNext: true,
+        spacing: { before: 120, after: 60 },
+        children: [new ImageRun({
+          type: 'png',
+          data: img.buffer,
+          transformation: { width, height },
+        })],
+      }));
+    }
     this.imageIndex += 1;
 
     // 图注由预处理脚本插入,此处不再自动生成
@@ -622,7 +748,7 @@ class Md2DocxConverter {
             const runs = this.inlineToRuns(inlineTok);
             if (!firstParaHandled) {
               const refKey = ['l1', 'l2', 'l3'][Math.min(listLevel, 3) - 1];
-              this.bodyChildren.push(new Paragraph({
+              this.currentSection.children.push(new Paragraph({
                 style: 'Normal',
                 numbering: { reference: refs[refKey], level: 0 },
                 indent: { firstLine: 0 },
@@ -630,7 +756,7 @@ class Md2DocxConverter {
               }));
               firstParaHandled = true;
             } else {
-              this.bodyChildren.push(new Paragraph({
+              this.currentSection.children.push(new Paragraph({
                 style: 'Normal',
                 indent: { left: cm(0.74 * Math.min(listLevel, 3)), firstLine: 0 },
                 children: runs,
@@ -795,9 +921,9 @@ class Md2DocxConverter {
       },
       rows: [headerRow, ...dataRows],
     });
-    this.bodyChildren.push(table);
+    this.currentSection.children.push(table);
     // 表格后追加空行,避免连续表格直接粘连
-    this.bodyChildren.push(new Paragraph({ children: [new TextRun('')] }));
+    this.currentSection.children.push(new Paragraph({ children: [new TextRun('')] }));
     return i + 1;
   }
 
@@ -810,7 +936,7 @@ class Md2DocxConverter {
         const inline = tokens[i + 1];
         const runs = this.inlineToRuns(inline);
         // 引用块:左缩进 0.74cm,无首行缩进
-        this.bodyChildren.push(new Paragraph({
+        this.currentSection.children.push(new Paragraph({
           style: 'Normal',
           indent: { left: cm(0.74), firstLine: 0 },
           children: runs,
@@ -1009,10 +1135,37 @@ async function main() {
 
   // 转换正文
   const converter = new Md2DocxConverter({ inputDir, srcDir });
-  const bodyChildren = converter.convert(content);
-  console.log(`[md2docx] 正文段落/元素数: ${bodyChildren.length}`);
+  const converterSections = converter.convert(content);
+  console.log(`[md2docx] 正文段落/元素数: ${converterSections.reduce((sum, sec) => sum + sec.children.length, 0)}`);
   console.log(`[md2docx] 嵌入图片: ${converter.imageIndex} 个`);
   console.log(`[md2docx] 自动表注: ${converter.tableIndex} 个`);
+
+  // 装配正文 sections
+  const bodySections = converterSections.map((sec, idx) => {
+    const isFirst = (idx === 0);
+    const isLandscape = (sec.orientation === 'landscape');
+
+    const pageSize = isLandscape
+      ? { width: LANDSCAPE_PAGE.width, height: LANDSCAPE_PAGE.height }
+      : { width: PAGE.width, height: PAGE.height };
+
+    const pageNumbers = isFirst
+      ? { start: 1, formatType: NumberFormat.DECIMAL }
+      : { formatType: NumberFormat.DECIMAL };
+
+    return {
+      properties: {
+        type: isFirst ? SectionType.ODD_PAGE : SectionType.NEXT_PAGE,
+        page: {
+          size: pageSize,
+          margin: makePageMargin(),
+          pageNumbers,
+        },
+      },
+      footers: { default: makeFooter() },
+      children: sec.children,
+    };
+  });
 
   // 装配文档
   const doc = new Document({
@@ -1033,13 +1186,8 @@ async function main() {
             pageNumbers: { start: 1, formatType: NumberFormat.UPPER_ROMAN } } },
         footers: { default: makeFooter() },
         children: buildTOC() },
-      // 正文
-      { properties: { type: SectionType.ODD_PAGE,
-          page: { size: { width: PAGE.width, height: PAGE.height },
-            margin: makePageMargin(),
-            pageNumbers: { start: 1, formatType: NumberFormat.DECIMAL } } },
-        footers: { default: makeFooter() },
-        children: bodyChildren },
+      // 正文（动态展开）
+      ...bodySections,
     ],
   });
 
