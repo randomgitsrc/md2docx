@@ -1,0 +1,24 @@
+{
+  "name": "md2docx",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "directories": {
+    "doc": "docs"
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "@mermaid-js/mermaid-cli": "^11.15.0",
+    "adm-zip": "^0.5.17",
+    "docx": "^9.7.0",
+    "gray-matter": "^4.0.3",
+    "markdown-it": "^14.2.0",
+    "puppeteer": "^24.43.1"
+  }
+}
