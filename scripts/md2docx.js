@@ -110,7 +110,7 @@ const documentStyles = {
     { id: 'Caption', name: 'Caption', basedOn: 'Normal',
       run: { font: { ascii: FONT.西文, eastAsia: FONT.黑体, hAnsi: FONT.西文 }, size: SIZE.小四 },
       paragraph: { alignment: AlignmentType.CENTER,
-        keepNext: true,
+        keepLines: true,
         spacing: { line: 360, lineRule: 'auto', before: 60, after: 60 }, indent: { firstLine: 0 } } },
     { id: 'CodeBlock', name: '代码块', basedOn: 'Normal', next: 'Normal',
       run: { font: { ascii: FONT.等宽, eastAsia: FONT.等宽, hAnsi: FONT.等宽 }, size: SIZE.五号 },
@@ -512,6 +512,7 @@ class Md2DocxConverter {
 
     this.bodyChildren.push(new Paragraph({
       alignment: AlignmentType.CENTER, indent: { firstLine: 0 },
+      keepNext: true,
       spacing: { before: 120, after: 60 },
       children: [new ImageRun({
         type: 'png',
@@ -555,6 +556,7 @@ class Md2DocxConverter {
     this.bodyChildren.push(new Paragraph({
       alignment: AlignmentType.CENTER,
       indent: { firstLine: 0 },
+      keepNext: true,
       spacing: { before: 120, after: 60 },
       children: [new ImageRun({
         type: 'png',
@@ -919,15 +921,12 @@ for tbl in doc.tables:
         if trPr.find(qn('w:cantSplit')) is None:
             trPr.append(OxmlElement('w:cantSplit'))
 
-# 2. Caption 段落加 keepNext + keepLines
-#    keepNext: 题注与下一个块级元素(表格)保持在同一页
-#    keepLines: 题注段落内部不分页
+# 2. Caption 段落加 keepLines
+#    keepLines: 图注段落内部不分页
 for p in doc.paragraphs:
     s = p.style
     if s is not None and s.style_id == 'Caption':
         pPr = p._element.get_or_add_pPr()
-        if pPr.find(qn('w:keepNext')) is None:
-            pPr.append(OxmlElement('w:keepNext'))
         if pPr.find(qn('w:keepLines')) is None:
             pPr.append(OxmlElement('w:keepLines'))
 
