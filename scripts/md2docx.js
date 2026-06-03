@@ -31,6 +31,7 @@ const {
 } = require('docx');
 
 const { generateConfig } = require('./puppeteer-config');
+const { renderPlantUML } = require('./plantuml-renderer');
 
 // =========================================================================
 // 1. 基础工具与样式定义(从模板生成器原样照搬,保持视觉一致)
@@ -293,8 +294,9 @@ class Md2DocxConverter {
       html: true, breaks: false, linkify: true, typographer: false,
     });
     // 计数器
-        this.tableIndex = 0;
+    this.tableIndex = 0;
     this.mermaidIndex = 0;
+    this.plantUMLIndex = 0;
     this.imageIndex = 0;
     // 列表 reference 池索引
     this.listPoolIndex = 0;
@@ -469,6 +471,8 @@ class Md2DocxConverter {
         const lang = (t.info || '').trim().toLowerCase();
         if (lang === 'mermaid') {
           this.appendMermaid(t.content);
+        } else if (lang === 'plantuml') {
+          this.appendPlantUML(t.content);
         } else {
           this.appendCodeBlock(t.content);
         }
@@ -740,6 +744,48 @@ class Md2DocxConverter {
     this.imageIndex += 1;
 
     // 图注由预处理脚本插入,此处不再自动生成
+  }
+
+  // ---------- PlantUML 块 ----------
+  appendPlantUML(plantUMLCode) {
+    this.plantUMLIndex += 1;
+    let img;
+    try {
+      img = renderPlantUML(plantUMLCode, this.tmpDir, this.plantUMLIndex);
+    } catch (e) {
+      console.warn(`[警告] PlantUML 渲染失败 (#${this.plantUMLIndex}): ${e.message}`);
+      console.warn('  → 已降级为普通代码块');
+      this.appendCodeBlock(plantUMLCode);
+      return;
+    }
+
+    if (img.needsLandscape) {
+      this.startLandscapeSection();
+      const { width, height } = fitImageToLandscape(img.width, img.height);
+      this.currentSection.children.push(new Paragraph({
+        alignment: AlignmentType.CENTER,
+        indent: { firstLine: 0 },
+        keepNext: true,
+        spacing: { before: 120, after: 60 },
+        children: [new ImageRun({
+          type: 'png', data: img.buffer,
+          transformation: { width, height },
+        })],
+      }));
+      this.pendingLandscapeClose = true;
+    } else {
+      const { width, height } = fitImageToPage(img.width, img.height);
+      this.currentSection.children.push(new Paragraph({
+        alignment: AlignmentType.CENTER,
+        indent: { firstLine: 0 },
+        keepNext: true,
+        spacing: { before: 120, after: 60 },
+        children: [new ImageRun({
+          type: 'png', data: img.buffer,
+          transformation: { width, height },
+        })],
+      }));
+    }
   }
 
   // 找上一段正文段落的文字(用于图注的启发式提取)

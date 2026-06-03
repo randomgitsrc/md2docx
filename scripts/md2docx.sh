@@ -24,6 +24,22 @@ if ! command -v node >/dev/null 2>&1; then
   exit 1
 fi
 
+# ---- Java 检查（PlantUML 依赖）----
+if ! java -version >/dev/null 2>&1; then
+  echo "[警告] 未找到 Java，PlantUML 图表将无法渲染。"
+  echo "       请安装 Java: https://adoptium.net"
+fi
+
+# ---- plantuml.jar 检查 ----
+PLANTUML_JAR="${PROJECT_DIR}/bin/plantuml.jar"
+if java -version >/dev/null 2>&1 && [ ! -f "$PLANTUML_JAR" ] && ! which plantuml >/dev/null 2>&1; then
+  echo "[plantuml] 首次使用，正在下载 plantuml.jar..."
+  mkdir -p "$(dirname "$PLANTUML_JAR")"
+  curl -L -o "$PLANTUML_JAR" \
+    "https://github.com/plantuml/plantuml/releases/latest/download/plantuml.jar"
+  echo "[plantuml] 下载完成"
+fi
+
 usage() {
   cat <<'EOF'
 Usage: md2docx.sh [OPTIONS] <input.md> [input2.md ...]

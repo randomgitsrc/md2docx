@@ -22,6 +22,7 @@ const readline = require('readline');
 const matter = require('gray-matter');
 const yaml = require('js-yaml');
 const { generateConfig } = require('./puppeteer-config');
+const { renderPlantUML } = require('./plantuml-renderer');
 
 // =========================================================================
 // 1. 剥离标题自带编号
@@ -301,7 +302,62 @@ function renderMermaidBlocks(content, inputDir, baseName) {
 }
 
 // =========================================================================
-// 6. 剥离 bullet 列表项中的手动编号前缀
+// 6. PlantUML 代码块 → 渲染为 PNG
+// =========================================================================
+function renderPlantUMLBlocks(content, inputDir, baseName) {
+  const pumlDir = path.join(inputDir, 'output', '.plantuml');
+  if (!fs.existsSync(pumlDir)) fs.mkdirSync(pumlDir, { recursive: true });
+
+  let figureIndex = 0;
+  const lines = content.split('\n');
+  const result = [];
+  let i = 0;
+
+  while (i < lines.length) {
+    if (lines[i].match(/^```plantuml\s*$/i)) {
+      const pumlLines = [];
+      i++;
+      while (i < lines.length && !lines[i].match(/^```\s*$/)) {
+        pumlLines.push(lines[i]);
+        i++;
+      }
+      i++;  // skip closing ```
+
+      const pumlCode = pumlLines.join('\n');
+      figureIndex++;
+
+      const pngName = `${baseName}_puml${figureIndex}.png`;
+      const pngPath = path.join(pumlDir, pngName);
+
+      let rendered = false;
+      try {
+        const img = renderPlantUML(pumlCode, pumlDir, figureIndex);
+        fs.writeFileSync(pngPath, img.buffer);
+        rendered = true;
+      } catch (e) {
+        console.warn(`\n  [plantuml] 渲染失败 (图${figureIndex}): ${e.message}`);
+      }
+
+      if (rendered) {
+        const relPath = path.relative(inputDir, pngPath).replace(/\\/g, '/');
+        result.push(`![](${relPath})`);
+      } else {
+        // 渲染失败：降级为 text 代码块，避免 md2docx 阶段重复尝试渲染
+        result.push('```text');
+        result.push(...pumlLines);
+        result.push('```');
+      }
+    } else {
+      result.push(lines[i]);
+      i++;
+    }
+  }
+
+  return result.join('\n');
+}
+
+// =========================================================================
+// 7. 剥离 bullet 列表项中的手动编号前缀
 // =========================================================================
 // md 中 `- a) 接口优先级` 这种写法，a) 会和 Word 自动编号叠加成 "1 a)"
 // 需要剥掉手动编号前缀，让 Word 自动编号接管
@@ -384,11 +440,14 @@ function main() {
   raw = renderMermaidBlocks(raw, inputDir, baseName);
   console.log('[preprocess] 3. Mermaid 图表已渲染');
 
+  raw = renderPlantUMLBlocks(raw, inputDir, baseName);
+  console.log('[preprocess] 4. PlantUML 图表已渲染');
+
   raw = stripBulletManualNumbers(raw);
-  console.log('[preprocess] 4. 列表手动编号已剥离');
+  console.log('[preprocess] 5. 列表手动编号已剥离');
 
   raw = markCaptions(raw);
-  console.log('[preprocess] 5. 题注已标记为加粗');
+  console.log('[preprocess] 6. 题注已标记为加粗');
 
   raw = raw.replace(/\n{4,}/g, '\n\n\n');
 
