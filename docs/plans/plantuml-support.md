@@ -27,11 +27,10 @@ preprocess 和 md2docx 两条路径都能独立工作。preprocess 先跑时，p
 
 ### 共享模块
 
-新建 `scripts/plantuml-renderer.js`，导出三个函数，供 preprocess.js 和 md2docx.js 共同引用：
+新建 `scripts/plantuml-renderer.js`，导出两个函数，供 preprocess.js 和 md2docx.js 共同引用：
 
 - `findPlantUML()` — 找到可用的 plantuml 运行方式
 - `renderPlantUML(code, tmpDir, index)` — 渲染一段 plantuml 源码为 PNG
-- `estimatePlantUMLWidth(code)` — 分析源码宽度，决定是否横置
 
 ---
 
@@ -126,6 +125,8 @@ function renderPlantUML(code, tmpDir, index) {
   const height = buffer.readUInt32BE(20);
 
   // 5. 横置判断：基于渲染后图片实际尺寸（统一与 appendImageParagraph 一致）
+  //    CONTENT_WIDTH_PX 在 plantuml-renderer.js 内部定义，与 md2docx.js 保持一致
+  const CONTENT_WIDTH_PX = Math.round((21 - 2.7 - 2.7) * 96 / 2.54); // A4 内容区宽度(px)
   const downscaleRatio = width / CONTENT_WIDTH_PX;
   const aspectRatio = width / height;
   const needsLandscape = downscaleRatio > 3 && aspectRatio > 2.0;
