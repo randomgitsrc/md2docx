@@ -339,7 +339,9 @@ function renderPlantUMLBlocks(content, inputDir, baseName) {
       }
 
       if (rendered) {
-        const relPath = path.relative(inputDir, pngPath).replace(/\\/g, '/');
+        // 图片路径相对于 clean.md 输出目录
+        const cleanDir = path.join(inputDir, 'output', 'clean');
+        const relPath = path.relative(cleanDir, pngPath).replace(/\\/g, '/');
         result.push(`![](${relPath})`);
       } else {
         // 渲染失败：降级为 text 代码块，避免 md2docx 阶段重复尝试渲染

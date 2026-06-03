@@ -38,8 +38,10 @@ function downloadPlantUML() {
   const jarPath = path.join(binDir, 'plantuml.jar');
   fs.mkdirSync(binDir, { recursive: true });
 
-  const url = 'https://github.com/plantuml/plantuml/releases/latest/download/plantuml.jar';
-  console.log('[plantuml] 首次使用，正在下载 plantuml.jar...');
+  // Use v1.2023.0 which supports Java 8 (class file version 52)
+  // Latest versions require Java 11+ (class file version 55+)
+  const url = 'https://github.com/plantuml/plantuml/releases/download/v1.2023.0/plantuml.jar';
+  console.log('[plantuml] 首次使用，正在下载 plantuml.jar (v1.2023.0, 兼容 Java 8)...');
   execSync(`curl -L -o "${jarPath}" "${url}"`, { stdio: 'inherit' });
   console.log('[plantuml] 下载完成');
   return { type: 'jar', jar: jarPath };
