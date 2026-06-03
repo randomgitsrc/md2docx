@@ -199,6 +199,12 @@ function renderMermaidBlocks(content, inputDir, baseName) {
       let mermaidCode = mermaidLines.join('\n');
       figureIndex++;
 
+      // 注入 init 指令：使用直线连线，去除"AI味"
+      const hasUserInit = /^%%\{init:/m.test(mermaidCode);
+      if (!hasUserInit) {
+        mermaidCode = `%%{init: {'flowchart': {'curve': 'linear'}}}%%\n` + mermaidCode;
+      }
+
       const pngName = `${baseName}_fig${figureIndex}.png`;
       const pngPath = path.join(mermaidDir, pngName);
       const mmdPath = path.join(mermaidDir, `${baseName}_fig${figureIndex}.mmd`);

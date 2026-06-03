@@ -213,6 +213,12 @@ function renderMermaid(mermaidCode, tmpDir, index) {
   const cfgPath = generateConfig(tmpDir);
   const cfgArg = cfgPath ? `-p ${cfgPath}` : '';
 
+  // 注入 init 指令：使用直线连线，去除"AI味"
+  const hasUserInit = /^%%\{init:/m.test(mermaidCode);
+  if (!hasUserInit) {
+    mermaidCode = `%%{init: {'flowchart': {'curve': 'linear'}}}%%\n` + mermaidCode;
+  }
+
   fs.writeFileSync(inFile, mermaidCode);
   const mmdcDir = path.resolve(__dirname, '..');
   execSync(`npx mmdc -i ${inFile} -o ${outFile} -b white -w ${renderWidth} -H 2400 ${cfgArg}`,
