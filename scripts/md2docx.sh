@@ -33,10 +33,10 @@ fi
 # ---- plantuml.jar 检查 ----
 PLANTUML_JAR="${PROJECT_DIR}/bin/plantuml.jar"
 if java -version >/dev/null 2>&1 && [ ! -f "$PLANTUML_JAR" ] && ! which plantuml >/dev/null 2>&1; then
-  echo "[plantuml] 首次使用，正在下载 plantuml.jar..."
+  echo "[plantuml] 首次使用，正在下载 plantuml.jar (v1.2023.0, 兼容 Java 8)..."
   mkdir -p "$(dirname "$PLANTUML_JAR")"
   curl -L -o "$PLANTUML_JAR" \
-    "https://github.com/plantuml/plantuml/releases/latest/download/plantuml.jar"
+    "https://github.com/plantuml/plantuml/releases/download/v1.2023.0/plantuml.jar"
   echo "[plantuml] 下载完成"
 fi
 
