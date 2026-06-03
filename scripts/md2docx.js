@@ -162,8 +162,51 @@ const numberingConfig = {
 // 2. Mermaid 渲染辅助(调用 mmdc)
 // =========================================================================
 
+// =========================================================================
+// 2. Mermaid 渲染辅助(调用 mmdc)
+// =========================================================================
+
+// 分析 Mermaid 源码拓扑结构，估算是否需要横置
+function estimateMermaidWidth(mermaidCode) {
+  // 1. 识别布局方向，仅 TD/TB（自顶向下）方向会产生宽图
+  const dirMatch = mermaidCode.match(/^\s*(?:graph|flowchart)\s+(TD|TB|LR|RL|BT)/m);
+  if (!dirMatch) return { needsLandscape: false };  // 序列图、类图等默认竖置
+
+  const direction = dirMatch[1];
+  if (!['TD', 'TB'].includes(direction)) return { needsLandscape: false };  // LR/RL 是窄高图
+
+  // 2. 提取所有边：source --> target
+  const edgePattern = /([\w]+)(?:\[[^\]]*\]|\([^)]*\)|\{[^}]*\})?\s*(?:-->|---|-\.->|==>)\s*(?:\|[^|]*\|)?\s*([\w]+)/g;
+  const children = {};
+  let match;
+  while ((match = edgePattern.exec(mermaidCode)) !== null) {
+    if (!children[match[1]]) children[match[1]] = new Set();
+    children[match[1]].add(match[2]);
+  }
+
+  // 3. 收集所有节点，找叶节点（无出边的节点）
+  const allNodes = new Set();
+  for (const [p, cs] of Object.entries(children)) {
+    allNodes.add(p);
+    cs.forEach(c => allNodes.add(c));
+  }
+  const leafCount = [...allNodes].filter(n => !children[n] || children[n].size === 0).length;
+
+  // 4. 宽度评分 = max(最大子节点数, 叶节点数/2)
+  const maxChildren = Math.max(0, ...Object.values(children).map(s => s.size));
+  const widthScore = Math.max(maxChildren, Math.ceil(leafCount / 2));
+
+  return { needsLandscape: widthScore > 5 };
+}
+
 // 在临时目录里渲染 mermaid 代码 → PNG buffer + 宽高
 function renderMermaid(mermaidCode, tmpDir, index) {
+  // 渲染前分析拓扑，决定横置
+  const { needsLandscape } = estimateMermaidWidth(mermaidCode);
+
+  // 根据模式选择渲染宽度（横置需要更高分辨率）
+  const renderWidth = needsLandscape ? 3600 : 2400;
+
   const inFile = path.join(tmpDir, `m_${index}.mmd`);
   const outFile = path.join(tmpDir, `m_${index}.png`);
 
@@ -172,7 +215,7 @@ function renderMermaid(mermaidCode, tmpDir, index) {
 
   fs.writeFileSync(inFile, mermaidCode);
   const mmdcDir = path.resolve(__dirname, '..');
-  execSync(`npx mmdc -i ${inFile} -o ${outFile} -b white -w 3600 -H 2400 ${cfgArg}`,
+  execSync(`npx mmdc -i ${inFile} -o ${outFile} -b white -w ${renderWidth} -H 2400 ${cfgArg}`,
     { stdio: 'pipe', cwd: mmdcDir });
 
   // 读出 PNG,顺便取宽高用于 docx 嵌入时计算缩放
@@ -180,7 +223,7 @@ function renderMermaid(mermaidCode, tmpDir, index) {
   // PNG 宽高在文件头 16-23 字节(大端)
   const width  = buffer.readUInt32BE(16);
   const height = buffer.readUInt32BE(20);
-  return { buffer, width, height };
+  return { buffer, width, height, needsLandscape };
 }
 
 // 图片按页面内容区等比缩放,超宽超高都限制
@@ -597,8 +640,9 @@ class Md2DocxConverter {
       }
     } catch (_) {}
 
+    const downscaleRatio = origW / CONTENT_WIDTH_PX;
     const aspectRatio = origW / origH;
-    const isLandscape = aspectRatio > 1.5;
+    const isLandscape = downscaleRatio > 3 && aspectRatio > 2.0;
 
     if (isLandscape) {
       this.startLandscapeSection();
@@ -658,10 +702,7 @@ class Md2DocxConverter {
       return;
     }
     // 自适应缩放:横图填满正文区,纵图按最大宽度等比
-    const aspectRatio = img.width / img.height;
-    const isLandscape = aspectRatio > 1.5;
-
-    if (isLandscape) {
+    if (img.needsLandscape) {
       this.startLandscapeSection();
       const { width, height } = fitImageToLandscape(img.width, img.height);
       this.currentSection.children.push(new Paragraph({
