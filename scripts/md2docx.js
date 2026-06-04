@@ -496,7 +496,7 @@ class Md2DocxConverter {
 
       case 'hr':
         // 分割线:用一个段落空行简单替代
-        this.bodyChildren.push(new Paragraph({ children: [new TextRun('')] }));
+        this.currentSection.children.push(new Paragraph({ children: [new TextRun('')] }));
         return i + 1;
 
       case 'blockquote_open': {
@@ -688,7 +688,7 @@ class Md2DocxConverter {
   appendCodeBlock(content) {
     const lines = content.replace(/\n$/, '').split('\n');
     for (const line of lines) {
-      this.bodyChildren.push(new Paragraph({
+      this.currentSection.children.push(new Paragraph({
         style: 'CodeBlock',
         children: [new TextRun({
           text: line || ' ',
@@ -790,8 +790,8 @@ class Md2DocxConverter {
 
   // 找上一段正文段落的文字(用于图注的启发式提取)
   findLastParagraphText() {
-    for (let k = this.bodyChildren.length - 1; k >= 0; k--) {
-      const p = this.bodyChildren[k];
+    for (let k = this.currentSection.children.length - 1; k >= 0; k--) {
+      const p = this.currentSection.children[k];
       if (p && p.constructor && p.constructor.name === 'Paragraph') {
         // 取段落内所有 TextRun 的拼接文本
         const text = this.extractParagraphText(p);
