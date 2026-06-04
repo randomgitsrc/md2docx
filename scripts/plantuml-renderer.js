@@ -109,7 +109,30 @@ function renderPlantUML(code, tmpDir, index) {
   try {
     execSync(cmd, { stdio: 'pipe', timeout: 30000 });
   } catch (e) {
-    throw new Error(`plantuml 渲染失败: ${e.stderr?.toString() || e.message}`);
+    // 解析 PlantUML 错误信息，提取行号和原因
+    const stderr = e.stderr?.toString() || e.message || '';
+    const lineMatch = stderr.match(/Error line (\d+) in file:/);
+    const lineNum = lineMatch ? lineMatch[1] : null;
+
+    // 提取代码中的对应行（用于显示上下文）
+    let context = '';
+    if (lineNum) {
+      const lines = code.split('\n');
+      const idx = parseInt(lineNum, 10) - 1; // 转为 0-based
+      if (idx >= 0 && idx < lines.length) {
+        context = `\n  错误位置（第 ${lineNum} 行）: ${lines[idx].trim()}`;
+      }
+    }
+
+    // 构建友好的错误信息
+    let errorMsg = 'PlantUML 渲染失败';
+    if (lineNum) {
+      errorMsg += `（第 ${lineNum} 行）`;
+    }
+    errorMsg += context;
+    errorMsg += `\n  原始错误: ${stderr.split('\n')[0]}`;
+
+    throw new Error(errorMsg);
   }
 
   if (!fs.existsSync(outFile)) {
