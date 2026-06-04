@@ -1140,12 +1140,15 @@ for tbl in doc.tables:
         if trPr.find(qn('w:cantSplit')) is None:
             trPr.append(OxmlElement('w:cantSplit'))
 
-# 2. Caption 段落加 keepLines
-#    keepLines: 图注段落内部不分页
+# 2. Caption 段落加 keepNext + keepLines
+#    keepNext: 题注与表格/图片保持同页
+#    keepLines: 题注段落内部不分页
 for p in doc.paragraphs:
     s = p.style
     if s is not None and s.style_id == 'Caption':
         pPr = p._element.get_or_add_pPr()
+        if pPr.find(qn('w:keepNext')) is None:
+            pPr.append(OxmlElement('w:keepNext'))
         if pPr.find(qn('w:keepLines')) is None:
             pPr.append(OxmlElement('w:keepLines'))
 
