@@ -25,6 +25,30 @@ const { generateConfig } = require('./puppeteer-config');
 const { renderPlantUML } = require('./plantuml-renderer');
 
 // =========================================================================
+// 0. 进度提示工具
+// =========================================================================
+
+function logRenderProgress(type, current, total, message = '') {
+  const prefix = `[${type}]`;
+  const percent = Math.round((current / total) * 100);
+  const line = `${prefix} 渲染进度: ${current}/${total} (${percent}%) ${message}`;
+  process.stdout.write(`\r\x1b[K${line}`);
+}
+
+function logRenderDone(type, total, failed = 0) {
+  if (failed > 0) {
+    console.log(`\n[${type}] 渲染完成: ${total - failed}/${total} 成功, ${failed} 失败`);
+  } else {
+    console.log(`\n[${type}] 渲染完成: ${total}/${total} 成功`);
+  }
+}
+
+function logWarnDuringRender(message) {
+  process.stdout.write('\n');
+  console.warn(message);
+}
+
+// =========================================================================
 // 1. 剥离标题自带编号
 // =========================================================================
 // 多段数字 (1.2 / 1.2.3) 必定是编号; 单段数字 1-2 位 + 中文字符也视为编号
@@ -181,14 +205,22 @@ function renderMermaidBlocks(content, inputDir, baseName) {
   const mermaidDir = path.join(inputDir, 'output', '.mermaid');
   if (!fs.existsSync(mermaidDir)) fs.mkdirSync(mermaidDir, { recursive: true });
 
+  // 统计 mermaid 块数量
+  const mermaidMatches = content.match(/^```mermaid\s*$/gm) || [];
+  const total = mermaidMatches.length;
+  if (total === 0) return content;
+
+  console.log(`[mermaid] 发现 ${total} 个 Mermaid 图`);
+
   let figureIndex = 0;
+  let failedCount = 0;
   const lines = content.split('\n');
   const result = [];
   let i = 0;
 
   while (i < lines.length) {
     if (lines[i].match(/^```mermaid\s*$/i)) {
-      const mermaidStartLine = i + 1; // 记录 mermaid 代码块在原始文件中的起始行号（1-based）
+      const mermaidStartLine = i + 1;
       const mermaidLines = [];
       i++;
       while (i < lines.length && !lines[i].match(/^```\s*$/)) {
@@ -197,8 +229,10 @@ function renderMermaidBlocks(content, inputDir, baseName) {
       }
       i++; // skip closing ```
 
-      let mermaidCode = mermaidLines.join('\n');
       figureIndex++;
+      logRenderProgress('mermaid', figureIndex, total);
+
+      let mermaidCode = mermaidLines.join('\n');
 
       // 注入 init 指令：使用直线连线，去除"AI味"
       const hasUserInit = /^%%\{init:/m.test(mermaidCode);
@@ -224,7 +258,7 @@ function renderMermaidBlocks(content, inputDir, baseName) {
         );
         rendered = fs.existsSync(pngPath);
       } catch (e) {
-        console.warn(`\n  [mermaid] 渲染失败 (图${figureIndex}): ${e.message}`);
+        logWarnDuringRender(`[mermaid] 渲染失败 (图${figureIndex}): ${e.message}`);
         const issues = detectMermaidIssues(mermaidCode);
         if (issues.length > 0) {
           console.warn(`  [mermaid] 检测到可能的语法问题:`);
@@ -241,7 +275,7 @@ function renderMermaidBlocks(content, inputDir, baseName) {
       if (!rendered && retryWithFix) {
         // 使用同步方式询问（因为我们在 while 循环中）
         const fixedCode = fixMermaidCode(mermaidCode);
-        console.warn(`\n  [mermaid] 建议修复方案:`);
+        logWarnDuringRender(`[mermaid] 建议修复方案:`);
         // 找到有问题的行用于展示
         const originalLines = mermaidCode.split('\n');
         const fixedLines = fixedCode.split('\n');
@@ -281,6 +315,7 @@ function renderMermaidBlocks(content, inputDir, baseName) {
         result.push(`![图 ${figureIndex}](${relPath})`);
         result.push('');
       } else {
+        failedCount++;
         // 渲染失败：改为普通代码块，避免 md2docx 阶段重复尝试渲染
         result.push('```text');
         result.push(mermaidCode);
@@ -298,6 +333,7 @@ function renderMermaidBlocks(content, inputDir, baseName) {
     i++;
   }
 
+  logRenderDone('mermaid', total, failedCount);
   return result.join('\n');
 }
 
@@ -308,7 +344,15 @@ function renderPlantUMLBlocks(content, inputDir, baseName) {
   const pumlDir = path.join(inputDir, 'output', '.plantuml');
   if (!fs.existsSync(pumlDir)) fs.mkdirSync(pumlDir, { recursive: true });
 
+  // 统计 plantuml 块数量
+  const pumlMatches = content.match(/^```plantuml\s*$/gm) || [];
+  const total = pumlMatches.length;
+  if (total === 0) return content;
+
+  console.log(`[plantuml] 发现 ${total} 个 PlantUML 图`);
+
   let figureIndex = 0;
+  let failedCount = 0;
   const lines = content.split('\n');
   const result = [];
   let i = 0;
@@ -323,8 +367,10 @@ function renderPlantUMLBlocks(content, inputDir, baseName) {
       }
       i++;  // skip closing ```
 
-      const pumlCode = pumlLines.join('\n');
       figureIndex++;
+      logRenderProgress('plantuml', figureIndex, total);
+
+      const pumlCode = pumlLines.join('\n');
 
       const pngName = `${baseName}_puml${figureIndex}.png`;
       const pngPath = path.join(pumlDir, pngName);
@@ -335,7 +381,7 @@ function renderPlantUMLBlocks(content, inputDir, baseName) {
         fs.writeFileSync(pngPath, img.buffer);
         rendered = true;
       } catch (e) {
-        console.warn(`\n  [plantuml] 渲染失败 (图${figureIndex}): ${e.message}`);
+        logWarnDuringRender(`[plantuml] 渲染失败 (图${figureIndex}): ${e.message}`);
       }
 
       if (rendered) {
@@ -344,6 +390,7 @@ function renderPlantUMLBlocks(content, inputDir, baseName) {
         const relPath = path.relative(cleanDir, pngPath).replace(/\\/g, '/');
         result.push(`![](${relPath})`);
       } else {
+        failedCount++;
         // 渲染失败：降级为 text 代码块，避免 md2docx 阶段重复尝试渲染
         result.push('```text');
         result.push(...pumlLines);
@@ -355,6 +402,7 @@ function renderPlantUMLBlocks(content, inputDir, baseName) {
     }
   }
 
+  logRenderDone('plantuml', total, failedCount);
   return result.join('\n');
 }
 

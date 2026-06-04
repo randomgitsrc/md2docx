@@ -10,6 +10,30 @@ const { execSync } = require('child_process');
 const CONTENT_WIDTH_PX = Math.round((21 - 2.7 - 2.7) * 96 / 2.54);
 
 // =========================================================================
+// 0. Graphviz 检测
+// =========================================================================
+
+let graphvizChecked = false;
+let hasGraphviz = false;
+
+function checkGraphviz() {
+  if (graphvizChecked) return hasGraphviz;
+  try {
+    execSync('dot -V', { stdio: 'pipe' });
+    hasGraphviz = true;
+  } catch {
+    hasGraphviz = false;
+    console.warn('\n╔════════════════════════════════════════════════════╗');
+    console.warn('║  [plantuml] 警告：未检测到 Graphviz                ║');
+    console.warn('║  部分图类型可能无法渲染，请安装：                   ║');
+    console.warn('║  sudo apt-get install graphviz                    ║');
+    console.warn('╚════════════════════════════════════════════════════╝');
+  }
+  graphvizChecked = true;
+  return hasGraphviz;
+}
+
+// =========================================================================
 // 1. 查找可用的 PlantUML
 // =========================================================================
 
@@ -64,6 +88,9 @@ function buildCommand(puml, inFile, outDir) {
 // =========================================================================
 
 function renderPlantUML(code, tmpDir, index) {
+  // 0. 检测 Graphviz
+  checkGraphviz();
+
   // 1. 确保有可用的 plantuml
   let puml = findPlantUML();
   if (!puml) {
