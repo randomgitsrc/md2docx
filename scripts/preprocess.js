@@ -359,6 +359,7 @@ function renderPlantUMLBlocks(content, inputDir, baseName) {
 
   while (i < lines.length) {
     if (lines[i].match(/^```plantuml\s*$/i)) {
+      const pumlStartLine = i + 1; // 记录 plantuml 代码块在原始文件中的起始行号（1-based）
       const pumlLines = [];
       i++;
       while (i < lines.length && !lines[i].match(/^```\s*$/)) {
@@ -381,7 +382,15 @@ function renderPlantUMLBlocks(content, inputDir, baseName) {
         fs.writeFileSync(pngPath, img.buffer);
         rendered = true;
       } catch (e) {
-        logWarnDuringRender(`[plantuml] 渲染失败 (图${figureIndex}): ${e.message}`);
+        // 解析错误信息，提取内部行号并转换为原始文件行号
+        let errorMsg = e.message;
+        const lineMatch = errorMsg.match(/第 (\d+) 行/);
+        if (lineMatch) {
+          const internalLine = parseInt(lineMatch[1], 10);
+          const originalLine = pumlStartLine + internalLine - 1;
+          errorMsg = errorMsg.replace(/第 \d+ 行/, `原始文件第 ${originalLine} 行`);
+        }
+        logWarnDuringRender(`[plantuml] 渲染失败 (图${figureIndex}): ${errorMsg}`);
       }
 
       if (rendered) {
