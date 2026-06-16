@@ -398,6 +398,7 @@ function renderPlantUMLBlocks(content, inputDir, baseName) {
         const cleanDir = path.join(inputDir, 'output', 'clean');
         const relPath = path.relative(cleanDir, pngPath).replace(/\\/g, '/');
         result.push(`![](${relPath})`);
+        result.push('');
       } else {
         failedCount++;
         // 渲染失败：降级为 text 代码块，避免 md2docx 阶段重复尝试渲染

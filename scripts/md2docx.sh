@@ -25,18 +25,30 @@ if ! command -v node >/dev/null 2>&1; then
 fi
 
 # ---- Java 检查（PlantUML 依赖）----
-if ! java -version >/dev/null 2>&1; then
+# 优先使用 Java 11+，回退到系统默认 java
+JAVA_CMD=""
+for j in /usr/lib/jvm/java-11-*/bin/java /usr/lib/jvm/java-17-*/bin/java /usr/lib/jvm/java-21-*/bin/java; do
+  if [ -x "$j" ]; then
+    JAVA_CMD="$j"
+    break
+  fi
+done
+if [ -z "$JAVA_CMD" ]; then
+  JAVA_CMD="java"
+fi
+
+if ! "$JAVA_CMD" -version >/dev/null 2>&1; then
   echo "[警告] 未找到 Java，PlantUML 图表将无法渲染。"
   echo "       请安装 Java: https://adoptium.net"
 fi
 
 # ---- plantuml.jar 检查 ----
 PLANTUML_JAR="${PROJECT_DIR}/bin/plantuml.jar"
-if java -version >/dev/null 2>&1 && [ ! -f "$PLANTUML_JAR" ] && ! which plantuml >/dev/null 2>&1; then
-  echo "[plantuml] 首次使用，正在下载 plantuml.jar (v1.2023.0, 兼容 Java 8)..."
+if "$JAVA_CMD" -version >/dev/null 2>&1 && [ ! -f "$PLANTUML_JAR" ] && ! which plantuml >/dev/null 2>&1; then
+  echo "[plantuml] 首次使用，正在下载 plantuml.jar (最新版)..."
   mkdir -p "$(dirname "$PLANTUML_JAR")"
   curl -L -o "$PLANTUML_JAR" \
-    "https://github.com/plantuml/plantuml/releases/download/v1.2023.0/plantuml.jar"
+    "https://github.com/plantuml/plantuml/releases/download/v1.2025.2/plantuml.jar"
   echo "[plantuml] 下载完成"
 fi
 

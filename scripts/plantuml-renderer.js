@@ -72,19 +72,140 @@ function downloadPlantUML() {
 }
 
 // =========================================================================
-// 3. 组装渲染命令
+// 3. 自动修复 PlantUML 语法 + 中文字体注入
 // =========================================================================
 
-function buildCommand(puml, inFile, outDir) {
-  if (puml.type === 'command') {
-    return `plantuml -tpng -o "${outDir}" "${inFile}"`;
+// 修复同一 if 块内多个 else 的问题：
+// PlantUML 要求多分支用 elseif，但标准 UML 活动图允许多个 else
+// 规则：如果 if 块内有多个 else，则把所有 else 都转为 elseif
+//   else (起降模拟)  →  elseif (起降模拟) then (是)
+function fixMultiElse(code) {
+  const lines = code.split('\n');
+  let fixed = false;
+
+  // 第一遍：标记哪些 if 块有多 else
+  const stack = [];
+  const multiElseIfs = new Set();
+  for (let i = 0; i < lines.length; i++) {
+    const trimmed = lines[i].trimStart();
+    if (trimmed.match(/^if\s*\(/)) stack.push({ elseCount: 0, ifLine: i });
+    if (trimmed.match(/^else\b/) && stack.length > 0) {
+      stack[stack.length - 1].elseCount++;
+      if (stack[stack.length - 1].elseCount > 1) {
+        multiElseIfs.add(stack[stack.length - 1].ifLine);
+      }
+    }
+    if (trimmed.match(/^endif/)) stack.pop();
   }
-  // jar 方式：需要 java
-  return `java -jar "${puml.jar}" -tpng -o "${outDir}" "${inFile}"`;
+
+  // 第二遍：对多 else 的 if 块，把所有 else 转为 elseif
+  const stack2 = [];
+  for (let i = 0; i < lines.length; i++) {
+    const trimmed = lines[i].trimStart();
+    const indent = lines[i].slice(0, lines[i].length - trimmed.length);
+    if (trimmed.match(/^if\s*\(/)) stack2.push({ ifLine: i });
+    if (trimmed.match(/^else\b/) && stack2.length > 0) {
+      if (multiElseIfs.has(stack2[stack2.length - 1].ifLine)) {
+        const m = trimmed.match(/^else\s*\((.+?)\)\s*$/);
+        if (m) {
+          lines[i] = `${indent}elseif (${m[1]}) then (是)`;
+          fixed = true;
+        }
+      }
+    }
+    if (trimmed.match(/^endif/)) stack2.pop();
+  }
+
+  return fixed ? lines.join('\n') : null;
+}
+
+// 检测系统可用中文字体，返回 PlantUML 可用的字体名
+let cachedChineseFont = null;
+function findChineseFont() {
+  if (cachedChineseFont !== null) return cachedChineseFont;
+  try {
+    const output = execSync('fc-list :lang=zh', { stdio: 'pipe', encoding: 'utf8' });
+    const fonts = output.split('\n');
+    // 优先顺序：Noto Sans SC > WenQuanYi Zen Hei > SimSun > 其他
+    for (const line of fonts) {
+      if (line.includes('Noto Sans SC')) { cachedChineseFont = 'Noto Sans SC'; return cachedChineseFont; }
+      if (line.includes('WenQuanYi Zen Hei')) { cachedChineseFont = 'WenQuanYi Zen Hei'; return cachedChineseFont; }
+      if (line.includes('SimSun') || line.includes('宋体')) { cachedChineseFont = 'SimSun'; return cachedChineseFont; }
+      if (line.includes('Microsoft YaHei') || line.includes('微软雅黑')) { cachedChineseFont = 'Microsoft YaHei'; return cachedChineseFont; }
+      if (line.includes('DengXian') || line.includes('等线')) { cachedChineseFont = 'DengXian'; return cachedChineseFont; }
+    }
+    cachedChineseFont = '';
+    return cachedChineseFont;
+  } catch {
+    cachedChineseFont = '';
+    return cachedChineseFont;
+  }
+}
+
+// 注入中文字体配置到 PlantUML 代码中
+function injectChineseFont(code) {
+  const font = findChineseFont();
+  if (!font) return code;
+  // 如果已有 font 相关配置，跳过
+  if (/skinparam\s+(defaultFontName|FontName)/i.test(code)) return code;
+  // 在 @startuml 后插入字体配置（放在 !theme 之后，避免被主题覆盖）
+  const fontLine = `skinparam defaultFontName "${font}"`;
+  // 如果代码中有 !theme plain，把字体配置放在它后面
+  const themeMatch = code.match(/^(!theme\s+\w+)$/m);
+  if (themeMatch) {
+    return code.replace(themeMatch[0], `${themeMatch[0]}\n${fontLine}`);
+  }
+  // 否则放在 @startuml 后面
+  return code.replace(/^(@startuml)/m, `$1\n${fontLine}`);
 }
 
 // =========================================================================
-// 4. 渲染 PlantUML 源码 → PNG
+// 4. 组装渲染命令
+// =========================================================================
+
+function buildCommand(puml, inFile, outDir) {
+  // 优先使用 Java 11+ 运行 PlantUML，回退到系统默认 java
+  let javaCmd = 'java';
+  for (const j of ['/usr/lib/jvm/java-21-openjdk-amd64/bin/java', '/usr/lib/jvm/java-17-openjdk-amd64/bin/java', '/usr/lib/jvm/java-11-openjdk-amd64/bin/java']) {
+    if (fs.existsSync(j)) { javaCmd = j; break; }
+  }
+  if (puml.type === 'command') {
+    return `plantuml -tpng -o "${outDir}" "${inFile}"`;
+  }
+  // jar 方式：优先使用 Java 11+
+  return `${javaCmd} -jar "${puml.jar}" -tpng -o "${outDir}" "${inFile}"`;
+}
+
+// =========================================================================
+// 5. 构建渲染错误信息
+// =========================================================================
+
+function buildRenderError(e, code) {
+  const stderr = e.stderr?.toString() || e.message || '';
+  const lineMatch = stderr.match(/Error line (\d+) in file:/);
+  const lineNum = lineMatch ? lineMatch[1] : null;
+
+  let context = '';
+  if (lineNum) {
+    const lines = code.split('\n');
+    const idx = parseInt(lineNum, 10) - 1;
+    if (idx >= 0 && idx < lines.length) {
+      context = `\n  错误位置（第 ${lineNum} 行）: ${lines[idx].trim()}`;
+    }
+  }
+
+  let errorMsg = 'PlantUML 渲染失败';
+  if (lineNum) {
+    errorMsg += `（第 ${lineNum} 行）`;
+  }
+  errorMsg += context;
+  errorMsg += `\n  原始错误: ${stderr.split('\n')[0]}`;
+
+  return new Error(errorMsg);
+}
+
+// =========================================================================
+// 6. 渲染 PlantUML 源码 → PNG
 // =========================================================================
 
 function renderPlantUML(code, tmpDir, index) {
@@ -99,40 +220,32 @@ function renderPlantUML(code, tmpDir, index) {
     if (!puml) throw new Error('plantuml 不可用，且自动下载失败');
   }
 
-  // 2. 写源文件（保留源文件便于调试）
+  // 2. 注入中文字体 + 写源文件（保留源文件便于调试）
   const inFile  = path.join(tmpDir, `p_${index}.puml`);
   const outFile = path.join(tmpDir, `p_${index}.png`);
-  fs.writeFileSync(inFile, code, 'utf8');
+  const codeWithFont = injectChineseFont(code);
+  fs.writeFileSync(inFile, codeWithFont, 'utf8');
 
   // 3. 执行渲染
   const cmd = buildCommand(puml, inFile, tmpDir);
   try {
     execSync(cmd, { stdio: 'pipe', timeout: 30000 });
   } catch (e) {
-    // 解析 PlantUML 错误信息，提取行号和原因
-    const stderr = e.stderr?.toString() || e.message || '';
-    const lineMatch = stderr.match(/Error line (\d+) in file:/);
-    const lineNum = lineMatch ? lineMatch[1] : null;
-
-    // 提取代码中的对应行（用于显示上下文）
-    let context = '';
-    if (lineNum) {
-      const lines = code.split('\n');
-      const idx = parseInt(lineNum, 10) - 1; // 转为 0-based
-      if (idx >= 0 && idx < lines.length) {
-        context = `\n  错误位置（第 ${lineNum} 行）: ${lines[idx].trim()}`;
+    // 渲染失败：尝试自动修复多 else 语法问题（基于原始代码，再注入字体）
+    const fixedCode = fixMultiElse(code);
+    if (fixedCode) {
+      const fixedWithFont = injectChineseFont(fixedCode);
+      fs.writeFileSync(inFile, fixedWithFont, 'utf8');
+      try {
+        execSync(cmd, { stdio: 'pipe', timeout: 30000 });
+        console.warn(`[plantuml] 图${index}: 自动修复多 else 语法后渲染成功`);
+      } catch (e2) {
+        // 修复后仍失败，用修复后的代码报告错误
+        throw buildRenderError(e2, fixedWithFont);
       }
+    } else {
+      throw buildRenderError(e, code);
     }
-
-    // 构建友好的错误信息
-    let errorMsg = 'PlantUML 渲染失败';
-    if (lineNum) {
-      errorMsg += `（第 ${lineNum} 行）`;
-    }
-    errorMsg += context;
-    errorMsg += `\n  原始错误: ${stderr.split('\n')[0]}`;
-
-    throw new Error(errorMsg);
   }
 
   if (!fs.existsSync(outFile)) {
