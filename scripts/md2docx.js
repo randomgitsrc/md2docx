@@ -123,7 +123,7 @@ const documentStyles = {
 // ---- 多级编号(标题、列表) ----
 // 注:列表编号在 Word 里是按 numId 实例延续的。为了每个"顶层列表"都能从 1 开始,
 // 我们为每层预注册一个 reference 池,转换时按需轮换使用。
-const LIST_POOL_SIZE = 200;  // 一篇文档支持最多 200 个独立顶层列表
+const LIST_POOL_SIZE = 500;  // 一篇文档支持最多 500 个独立顶层列表
 
 const numberingConfig = {
   config: [
@@ -330,10 +330,10 @@ class Md2DocxConverter {
   // 同一颗列表树共用同一组 ref;遇到下一个顶层列表时切换到下一组
   allocListRefs() {
     const n = this.listPoolIndex++;
-    if (n >= 200) {
-      console.warn(`[警告] 列表数超过 200 个,后续列表的编号可能与之前的重叠`);
+    if (n >= LIST_POOL_SIZE) {
+      console.warn(`[警告] 列表数超过 ${LIST_POOL_SIZE} 个,后续列表的编号可能与之前的重叠`);
     }
-    const safe = n % 200;
+    const safe = n % LIST_POOL_SIZE;
     return {
       l1: `list-l1-${safe}`,
       l2: `list-l2-${safe}`,
