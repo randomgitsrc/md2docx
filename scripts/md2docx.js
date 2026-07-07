@@ -123,41 +123,43 @@ const documentStyles = {
 // ---- 多级编号(标题、列表) ----
 // 注:列表编号在 Word 里是按 numId 实例延续的。为了每个"顶层列表"都能从 1 开始,
 // 我们为每层预注册一个 reference 池,转换时按需轮换使用。
-const LIST_POOL_SIZE = 500;  // 一篇文档支持最多 500 个独立顶层列表
+// 池大小由文档实际列表数决定（先扫描再构建），不设硬上限。
 
-const numberingConfig = {
-  config: [
-    { reference: 'heading-numbering',
-      levels: Array.from({ length: 9 }, (_, i) => ({
-        level: i, format: LevelFormat.DECIMAL,
-        text: Array.from({ length: i + 1 }, (_, j) => `%${j + 1}`).join('.'),
-        alignment: AlignmentType.LEFT,
-        style: { paragraph: { indent: { left: 0, hanging: 0, firstLine: 0 } } },
+function buildNumberingConfig(poolSize) {
+  return {
+    config: [
+      { reference: 'heading-numbering',
+        levels: Array.from({ length: 9 }, (_, i) => ({
+          level: i, format: LevelFormat.DECIMAL,
+          text: Array.from({ length: i + 1 }, (_, j) => `%${j + 1}`).join('.'),
+          alignment: AlignmentType.LEFT,
+          style: { paragraph: { indent: { left: 0, hanging: 0, firstLine: 0 } } },
+        })),
+      },
+      // 列表 L1 池: list-l1-0, list-l1-1, ...
+      ...Array.from({ length: poolSize }, (_, n) => ({
+        reference: `list-l1-${n}`,
+        levels: [{ level: 0, format: LevelFormat.DECIMAL, text: '%1.',
+          alignment: AlignmentType.LEFT,
+          style: { paragraph: { indent: { left: cm(0.74), hanging: cm(0.74) } } } }],
       })),
-    },
-    // 列表 L1 池: list-l1-0, list-l1-1, ...
-    ...Array.from({ length: LIST_POOL_SIZE }, (_, n) => ({
-      reference: `list-l1-${n}`,
-      levels: [{ level: 0, format: LevelFormat.DECIMAL, text: '%1.',
-        alignment: AlignmentType.LEFT,
-        style: { paragraph: { indent: { left: cm(0.74), hanging: cm(0.74) } } } }],
-    })),
-    // 列表 L2 池
-    ...Array.from({ length: LIST_POOL_SIZE }, (_, n) => ({
-      reference: `list-l2-${n}`,
-      levels: [{ level: 0, format: LevelFormat.DECIMAL, text: '(%1)',
-        alignment: AlignmentType.LEFT,
-        style: { paragraph: { indent: { left: cm(1.48), hanging: cm(0.74) } } } }],
-    })),
-    // 列表 L3 池
-    ...Array.from({ length: LIST_POOL_SIZE }, (_, n) => ({
-      reference: `list-l3-${n}`,
-      levels: [{ level: 0, format: LevelFormat.LOWER_LETTER, text: '%1)',
-        alignment: AlignmentType.LEFT,
-        style: { paragraph: { indent: { left: cm(2.22), hanging: cm(0.74) } } } }],
-    })),
-  ],
-};
+      // 列表 L2 池
+      ...Array.from({ length: poolSize }, (_, n) => ({
+        reference: `list-l2-${n}`,
+        levels: [{ level: 0, format: LevelFormat.DECIMAL, text: '(%1)',
+          alignment: AlignmentType.LEFT,
+          style: { paragraph: { indent: { left: cm(1.48), hanging: cm(0.74) } } } }],
+      })),
+      // 列表 L3 池
+      ...Array.from({ length: poolSize }, (_, n) => ({
+        reference: `list-l3-${n}`,
+        levels: [{ level: 0, format: LevelFormat.LOWER_LETTER, text: '%1)',
+          alignment: AlignmentType.LEFT,
+          style: { paragraph: { indent: { left: cm(2.22), hanging: cm(0.74) } } } }],
+      })),
+    ],
+  };
+}
 
 // =========================================================================
 // 2. Mermaid 渲染辅助(调用 mmdc)
@@ -281,6 +283,23 @@ function fitImageToLandscape(origW, origH) {
   return { width: w, height: h };
 }
 
+// 统计 markdown 中顶层列表数量（用于动态确定列表池大小）
+// 顶层列表 = 不缩进的 `- ` 或 `* ` 开头的连续行块
+function countTopLevelLists(content) {
+  let count = 0;
+  let inList = false;
+  for (const line of content.split('\n')) {
+    const isTopItem = /^[-*]\s/.test(line);
+    if (isTopItem && !inList) {
+      count++;
+      inList = true;
+    } else if (!isTopItem && !/^(\s+[-*]\s|\s*$)/.test(line)) {
+      inList = false;
+    }
+  }
+  return count;
+}
+
 // =========================================================================
 // 3. Markdown → docx 元素的核心转换器
 // =========================================================================
@@ -300,6 +319,7 @@ class Md2DocxConverter {
     this.imageIndex = 0;
     // 列表 reference 池索引
     this.listPoolIndex = 0;
+    this.listPoolSize = opts.listPoolSize || 200;
     // 分段结构
     this.sections = [];
     this.currentSection = null;
@@ -330,10 +350,7 @@ class Md2DocxConverter {
   // 同一颗列表树共用同一组 ref;遇到下一个顶层列表时切换到下一组
   allocListRefs() {
     const n = this.listPoolIndex++;
-    if (n >= LIST_POOL_SIZE) {
-      console.warn(`[警告] 列表数超过 ${LIST_POOL_SIZE} 个,后续列表的编号可能与之前的重叠`);
-    }
-    const safe = n % LIST_POOL_SIZE;
+    const safe = n % this.listPoolSize;
     return {
       l1: `list-l1-${safe}`,
       l2: `list-l2-${safe}`,
@@ -1229,8 +1246,13 @@ async function main() {
   console.log(`[md2docx] 公司: ${meta.company || '(未设置)'}`);
   console.log(`[md2docx] 日期: ${meta.date || '(未设置)'}`);
 
+  // 预扫描：统计顶层列表数量，动态确定列表池大小
+  const listCount = countTopLevelLists(content);
+  const listPoolSize = Math.max(listCount + 10, 50);  // 预留余量，最少 50
+  const numberingConfig = buildNumberingConfig(listPoolSize);
+
   // 转换正文
-  const converter = new Md2DocxConverter({ inputDir, srcDir });
+  const converter = new Md2DocxConverter({ inputDir, srcDir, listPoolSize });
   const converterSections = converter.convert(content);
   console.log(`[md2docx] 正文段落/元素数: ${converterSections.reduce((sum, sec) => sum + sec.children.length, 0)}`);
   console.log(`[md2docx] 嵌入图片: ${converter.imageIndex} 个`);
