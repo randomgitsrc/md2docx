@@ -234,10 +234,11 @@ function renderMermaidBlocks(content, inputDir, baseName) {
 
       let mermaidCode = mermaidLines.join('\n');
 
-      // 注入 init 指令：使用直线连线，去除"AI味"
+      // 注入 init 指令：neutral 主题（灰阶严谨）+ 直线连线，去除默认的彩色"AI味"
+      // 用户已在代码里写 %%{init}%% 时尊重其配置，不覆盖
       const hasUserInit = /^%%\{init:/m.test(mermaidCode);
       if (!hasUserInit) {
-        mermaidCode = `%%{init: {'flowchart': {'curve': 'linear'}}}%%\n` + mermaidCode;
+        mermaidCode = `%%{init: {'theme': 'neutral', 'flowchart': {'curve': 'linear'}}}%%\n` + mermaidCode;
       }
 
       const pngName = `${baseName}_fig${figureIndex}.png`;

@@ -142,6 +142,13 @@ function findChineseFont() {
   }
 }
 
+// 注入简洁主题：plain（黑白灰线框，技术文档风格），去除默认的蓝黄彩色
+// 用户已在代码里写 !theme 时尊重其配置，不覆盖
+function injectTheme(code) {
+  if (/^!theme\s+\w+/m.test(code)) return code;
+  return code.replace(/^(@startuml)/m, `$1\n!theme plain`);
+}
+
 // 注入中文字体配置到 PlantUML 代码中
 function injectChineseFont(code) {
   const font = findChineseFont();
@@ -220,10 +227,10 @@ function renderPlantUML(code, tmpDir, index) {
     if (!puml) throw new Error('plantuml 不可用，且自动下载失败');
   }
 
-  // 2. 注入中文字体 + 写源文件（保留源文件便于调试）
+  // 2. 注入简洁主题 + 中文字体 + 写源文件（保留源文件便于调试）
   const inFile  = path.join(tmpDir, `p_${index}.puml`);
   const outFile = path.join(tmpDir, `p_${index}.png`);
-  const codeWithFont = injectChineseFont(code);
+  const codeWithFont = injectChineseFont(injectTheme(code));
   fs.writeFileSync(inFile, codeWithFont, 'utf8');
 
   // 3. 执行渲染
@@ -234,7 +241,7 @@ function renderPlantUML(code, tmpDir, index) {
     // 渲染失败：尝试自动修复多 else 语法问题（基于原始代码，再注入字体）
     const fixedCode = fixMultiElse(code);
     if (fixedCode) {
-      const fixedWithFont = injectChineseFont(fixedCode);
+      const fixedWithFont = injectChineseFont(injectTheme(fixedCode));
       fs.writeFileSync(inFile, fixedWithFont, 'utf8');
       try {
         execSync(cmd, { stdio: 'pipe', timeout: 30000 });
