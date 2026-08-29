@@ -285,17 +285,16 @@ function fitImageToLandscape(origW, origH) {
 
 // 统计 markdown 中顶层列表数量（用于动态确定列表池大小）
 // 顶层列表 = 不缩进的 `- ` 或 `* ` 开头的连续行块
+// 统计所有列表（顶层 + 嵌套 + 有序 + 无序）的数量。
+// 这等于 allocListRefs() 的实际调用次数，用于预建足够大的编号池。
+// 旧实现只按行级正则数顶层无序列表，会漏数有序列表和嵌套子列表，
+// 导致列表多时池不够、allocListRefs 回绕复用 numId → 编号延续上一组（bug）。
 function countTopLevelLists(content) {
+  const md = new MarkdownIt({ html: false });
+  const tokens = md.parse(content, {});
   let count = 0;
-  let inList = false;
-  for (const line of content.split('\n')) {
-    const isTopItem = /^[-*]\s/.test(line);
-    if (isTopItem && !inList) {
-      count++;
-      inList = true;
-    } else if (!isTopItem && !/^(\s+[-*]\s|\s*$)/.test(line)) {
-      inList = false;
-    }
+  for (const t of tokens) {
+    if (t.type === 'bullet_list_open' || t.type === 'ordered_list_open') count++;
   }
   return count;
 }
@@ -348,13 +347,21 @@ class Md2DocxConverter {
 
   // 为一组(顶层)列表分配一组新的 l1/l2/l3 reference,使编号从 1 重新开始
   // 同一颗列表树共用同一组 ref;遇到下一个顶层列表时切换到下一组
+  // 注意：绝不回绕复用——复用 numId 会导致编号延续上一组（bug）。
+  // 池大小由 countTopLevelLists 预算（含嵌套+有序），正常够用；
+  // 若意外超池，宁可抛错暴露问题，也不静默复用。
   allocListRefs() {
     const n = this.listPoolIndex++;
-    const safe = n % this.listPoolSize;
+    if (n >= this.listPoolSize) {
+      throw new Error(
+        `列表编号池耗尽：已分配 ${n + 1} 组列表，但池大小仅 ${this.listPoolSize}。` +
+        `文档列表数量超出预期，请增大 listPoolSize 或检查 countTopLevelLists 统计。`
+      );
+    }
     return {
-      l1: `list-l1-${safe}`,
-      l2: `list-l2-${safe}`,
-      l3: `list-l3-${safe}`,
+      l1: `list-l1-${n}`,
+      l2: `list-l2-${n}`,
+      l3: `list-l3-${n}`,
     };
   }
 
