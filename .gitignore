@@ -2,3 +2,6 @@ node_modules/
 *.log
 .DS_Store
 bin/plantuml.jar
+
+# 转换产物（clean/ docx/ .mermaid/ .plantuml/，运行时重新生成，勿提交）
+md/output/
