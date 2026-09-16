@@ -67,6 +67,9 @@ md2docx 转换时，mermaid 与 PlantUML 图表**默认注入灰阶/黑白主题
 4. **分页后处理**：`patchDocxPagination()` 用 python-docx 注入 `cantSplit`/`keepNext`/`keepLines`（依赖 python3 + python-docx）。改分页相关逻辑时，docx.js 样式层与后处理层**不要重复注入**。
 5. **mermaid init 注入位置**：必须在写入 `.mmd` 文件**前**注入。preprocess 已渲染所有 mermaid，md2docx.js 的 init 注入只是兜底（实践中几乎不触发）。
 6. **图片缩放**：竖置 `fitImageToPage` / 横置 `fitImageToLandscape` 都先按宽缩放再 clamp 高度；`CONTENT_HEIGHT_PX` 用 0.90 系数（为标题/图注留余量）。
+7. **宽表列宽必须逐列分摊差值**：列数多时（如 33 列的位域表），若列宽下限（8%）总和超过页面总宽，把差值一次性加到"最大列"上会把该列压成负数，触发 docx 抛 `Invalid value '-N' specified. Must be a positive integer.`（整篇转换失败）。因此下限取 `min(8%, 总宽/列数)`，差值**逐列 ±1 分摊**，且取值处不能用 `||` 兜底（负值在 JS 中为 truthy）。回归用例：`md/qa/wide-table.md`。
+8. **PlantUML 结束标记**：块内只有 `@startuml` 而漏 `@enduml` 时，PlantUML 退出码仍为 0、只在 stderr 提示 `No diagram found` 且不产文件。`ensureEndMarker()` 会自动补全；报错行号需减去注入的 theme/font 行数偏移（`buildRenderError` 的 `injectedLineOffset`），否则指向错误源码行。回归用例：`md/qa/plantuml-no-end.md`。
+9. **PlantUML 名称需加引号**：组件/节点名含 `()`、`/`、`-` 等字符时不加引号会被当成表达式解析而渲染失败（如 `c3 as 服务进程通信(消息队列)`、`sjwz --> GMS-DM-BWJC : ...`）。正确写法：`c3 as "服务进程通信(消息队列)"`、`sjwz --> "GMS-DM-BWJC" : ...`。此类失败按约定降级为代码块，不影响整篇转换。
 
 ## 工作流程：计划 → 评审 → 实施
 

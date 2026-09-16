@@ -4,7 +4,9 @@ node_modules/
 bin/plantuml.jar
 
 # 转换产物（clean/ docx/ .mermaid/ .plantuml/，运行时重新生成，勿提交）
+# 覆盖 md/output/ 以及测试用例旁的 md/**/output/（如 md/qa/output/）
 md/output/
+md/**/output/
 
 # HTTP 服务作业工作目录（运行时生成，勿提交）
 data/jobs/

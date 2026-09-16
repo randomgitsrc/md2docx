@@ -985,23 +985,44 @@ class Md2DocxConverter {
       colWeights.push(maxDataW);
     }
 
-    const minColWidth = Math.floor(CONTENT_WIDTH * 0.08);
-    const totalWeight = colWeights.reduce((a, b) => a + b, 0);
+    // 列宽：按内容权重等比分配，设下限并保证每列 >= 1 DXA。
+    // 陷阱：列数很多时（宽表，如 33 列的位域图），固定 8% 下限的
+    // 总和会超过页面总宽，若把差值一次性加到单列上会把该列压成负数，
+    // docx 随即抛 "Invalid value '-N' specified. Must be a positive integer."
+    // 因此下限取 min(8%, 总宽/列数)，并把舍入差逐列 ±1 分摊。
+    const totalWeight = colWeights.reduce((a, b) => a + b, 0) || 1;
+    const minColWidth = Math.max(
+      1,
+      Math.min(Math.floor(CONTENT_WIDTH * 0.08), Math.floor(CONTENT_WIDTH / colCount))
+    );
     const columnWidths = colWeights.map(w => {
       const cw = Math.floor(CONTENT_WIDTH * w / totalWeight);
-      return Math.max(cw, minColWidth);
+      return Math.max(cw, minColWidth, 1);
     });
-    // 修正舍入误差
-    const totalW = columnWidths.reduce((a, b) => a + b, 0);
-    if (totalW !== CONTENT_WIDTH && columnWidths.length > 0) {
-      const maxIdx = columnWidths.indexOf(Math.max(...columnWidths));
-      columnWidths[maxIdx] += CONTENT_WIDTH - totalW;
+    // 修正舍入误差：逐列 ±1，任何情况下不产生 <= 0 的列宽
+    let diff = CONTENT_WIDTH - columnWidths.reduce((a, b) => a + b, 0);
+    let guard = Math.abs(diff) + colCount * 2;
+    let ci = 0;
+    while (diff !== 0 && guard-- > 0) {
+      const k = ci % columnWidths.length;
+      if (diff > 0) {
+        columnWidths[k] += 1;
+        diff -= 1;
+      } else if (columnWidths[k] > 1) {
+        columnWidths[k] -= 1;
+        diff += 1;
+      }
+      ci++;
     }
 
     const buildCell = (runs, isHeader = false, colIdx = 0) => {
       const border = { style: BorderStyle.SINGLE, size: 6, color: '000000' };
+      // 兜底也必须为正整数（负值在 JS 中为 truthy，不能靠 || 兜底）
+      const cw = columnWidths[colIdx] > 0
+        ? columnWidths[colIdx]
+        : Math.max(1, Math.floor(CONTENT_WIDTH / Math.max(colCount, 1)));
       return new TableCell({
-        width: { size: columnWidths[colIdx] || Math.floor(CONTENT_WIDTH / colCount), type: WidthType.DXA },
+        width: { size: cw, type: WidthType.DXA },
         margins: { top: 60, bottom: 60, left: 100, right: 100 },
         verticalAlign: VerticalAlign.CENTER,
         borders: { top: border, bottom: border, left: border, right: border },

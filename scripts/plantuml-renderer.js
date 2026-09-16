@@ -119,6 +119,20 @@ function fixMultiElse(code) {
   return fixed ? lines.join('\n') : null;
 }
 
+// 自动补全缺失的结束标记。
+// 常见手写遗漏：写了 @startuml 但漏掉 @enduml。PlantUML 对这类不完整块
+// 只在 stderr 提示 "No diagram found"、退出码仍为 0、且不产出任何文件，
+// 结果是整块降级为代码块且用户无从定位。这里直接按 @start<type> 补 @end<type>。
+// @returns {{ code: string, fixed: string|null }}
+function ensureEndMarker(code) {
+  const m = code.match(/@start(\w+)/);
+  if (!m) return { code, fixed: null };
+  const type = m[1];
+  // 已有对应结束标记（或任意 @endxxx）则不处理
+  if (new RegExp(`@end${type}\\b`).test(code)) return { code, fixed: null };
+  return { code: `${code.replace(/\s*$/, '')}\n@end${type}\n`, fixed: `@end${type}` };
+}
+
 // 检测系统可用中文字体，返回 PlantUML 可用的字体名
 let cachedChineseFont = null;
 function findChineseFont() {
@@ -187,17 +201,24 @@ function buildCommand(puml, inFile, outDir) {
 // 5. 构建渲染错误信息
 // =========================================================================
 
-function buildRenderError(e, code) {
+function buildRenderError(e, code, injectedLineOffset = 0) {
   const stderr = e.stderr?.toString() || e.message || '';
   const lineMatch = stderr.match(/Error line (\d+) in file:/);
-  const lineNum = lineMatch ? lineMatch[1] : null;
+  const reportedLine = lineMatch ? parseInt(lineMatch[1], 10) : null;
 
   let context = '';
-  if (lineNum) {
+  let lineNum = reportedLine;
+  if (reportedLine) {
+    // PlantUML 报的是「注入后文件」的行号，而注入会在 @startuml 后插入
+    // !theme / skinparam 行，必须减去偏移才能对应到用户原始块的行号，
+    // 否则会指向错误的位置、误导用户改错行。
+    const rawLine = Math.max(1, reportedLine - injectedLineOffset);
+    lineNum = rawLine;
     const lines = code.split('\n');
-    const idx = parseInt(lineNum, 10) - 1;
+    const idx = rawLine - 1;
     if (idx >= 0 && idx < lines.length) {
-      context = `\n  错误位置（第 ${lineNum} 行）: ${lines[idx].trim()}`;
+      // 行号只在这里之外出现一次（标题中），便于上层替换成"原始文件第 N 行"
+      context = `\n  错误位置: ${lines[idx].trim()}`;
     }
   }
 
@@ -228,18 +249,27 @@ function renderPlantUML(code, tmpDir, index) {
   }
 
   // 2. 注入简洁主题 + 中文字体 + 写源文件（保留源文件便于调试）
+  // 2. 自动补全缺失的结束标记（常见：有 @startuml 无 @enduml）
+  const closed = ensureEndMarker(code);
+  if (closed.fixed) {
+    console.warn(`[plantuml] 图${index}: 缺少结束标记 ${closed.fixed}，已自动补全`);
+  }
+  const baseCode = closed.code;
+
   const inFile  = path.join(tmpDir, `p_${index}.puml`);
   const outFile = path.join(tmpDir, `p_${index}.png`);
-  const codeWithFont = injectChineseFont(injectTheme(code));
+  const codeWithFont = injectChineseFont(injectTheme(baseCode));
   fs.writeFileSync(inFile, codeWithFont, 'utf8');
 
   // 3. 执行渲染
   const cmd = buildCommand(puml, inFile, tmpDir);
+  let renderStderr = '';
   try {
-    execSync(cmd, { stdio: 'pipe', timeout: 30000 });
+    const res = execSync(cmd, { stdio: 'pipe', timeout: 30000 });
+    if (res && res.stderr) renderStderr = res.stderr.toString();
   } catch (e) {
     // 渲染失败：尝试自动修复多 else 语法问题（基于原始代码，再注入字体）
-    const fixedCode = fixMultiElse(code);
+    const fixedCode = fixMultiElse(baseCode);
     if (fixedCode) {
       const fixedWithFont = injectChineseFont(injectTheme(fixedCode));
       fs.writeFileSync(inFile, fixedWithFont, 'utf8');
@@ -248,15 +278,19 @@ function renderPlantUML(code, tmpDir, index) {
         console.warn(`[plantuml] 图${index}: 自动修复多 else 语法后渲染成功`);
       } catch (e2) {
         // 修复后仍失败，用修复后的代码报告错误
-        throw buildRenderError(e2, fixedWithFont);
+        throw buildRenderError(e2, fixedCode, fixedWithFont.split('\n').length - fixedCode.split('\n').length);
       }
     } else {
-      throw buildRenderError(e, code);
+      throw buildRenderError(e, baseCode, codeWithFont.split('\n').length - baseCode.split('\n').length);
     }
   }
 
   if (!fs.existsSync(outFile)) {
-    throw new Error(`plantuml 渲染无输出: ${outFile}`);
+    // 未产出文件：给出可操作原因（PlantUML 常在 stderr 提示 No diagram found）
+    const hint = /no diagram found|no image/i.test(renderStderr)
+      ? '未找到完整图，通常是块内缺少 @enduml 等结束标记'
+      : 'PlantUML 未生成图像（请检查图语法是否完整）';
+    throw new Error(`plantuml 渲染无输出: ${outFile} — ${hint}`);
   }
 
   // 4. 读取 PNG 尺寸

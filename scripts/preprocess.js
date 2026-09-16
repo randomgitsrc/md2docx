@@ -373,7 +373,6 @@ function renderPlantUMLBlocks(content, dirs, baseName, hooks = {}) {
 
   while (i < lines.length) {
     if (lines[i].match(/^```plantuml\s*$/i)) {
-      const pumlStartLine = i + 1; // 记录 plantuml 代码块在原始文件中的起始行号（1-based）
       const pumlLines = [];
       i++;
       while (i < lines.length && !lines[i].match(/^```\s*$/)) {
@@ -397,12 +396,18 @@ function renderPlantUMLBlocks(content, dirs, baseName, hooks = {}) {
         fs.writeFileSync(pngPath, img.buffer);
         rendered = true;
       } catch (e) {
-        // 解析错误信息，提取内部行号并转换为原始文件行号
+        // 把「块内行号」换算成「原始 md 文件行号」。
+        // 注意：不能基于当前 content 的 pumlStartLine 计数——本轮之前已经跑过
+        // YAML 重排与 mermaid 渲染（把代码块换成图片引用），行数已发生漂移，
+        // 会导致报错行号偏移、误导用户改错行。
+        // 因此改用 hooks.origFenceLines（原始文件中每个 plantuml 围栏的行号，按序）
+        // 取本块在原始文件中的围栏行：块内第 1 行(@startuml) = 围栏行 + 1。
         let errorMsg = e.message;
         const lineMatch = errorMsg.match(/第 (\d+) 行/);
-        if (lineMatch) {
+        const origFence = hooks.origFenceLines && hooks.origFenceLines[figureIndex - 1];
+        if (lineMatch && origFence) {
           const internalLine = parseInt(lineMatch[1], 10);
-          const originalLine = pumlStartLine + internalLine - 1;
+          const originalLine = origFence + internalLine;
           errorMsg = errorMsg.replace(/第 \d+ 行/, `原始文件第 ${originalLine} 行`);
         }
         logWarnDuringRender(`[plantuml] 渲染失败 (图${figureIndex}): ${errorMsg}`);
@@ -512,6 +517,12 @@ function preprocess(inputPath, opts = {}) {
 
   let raw = fs.readFileSync(inputPath, 'utf-8');
 
+  // 记录原始文件中每个 plantuml 围栏的行号（按出现顺序，1-based）。
+  // 后续变换（YAML 重排、mermaid 渲染）会改变行数，报错行号必须据此换算回原文，
+  // 否则用户会按漂移后的行号去改错行。见 renderPlantUMLBlocks 的错误分支。
+  const origFenceLines = [...raw.matchAll(/^```plantuml\s*$/gm)]
+    .map(m => raw.slice(0, m.index).split('\n').length);
+
   raw = fixYamlFrontMatter(raw, opts.overrides);
   report.log('[preprocess] 1. YAML front matter 已修正');
   if (opts.onProgress) opts.onProgress(10, '修正 YAML front matter');
@@ -522,7 +533,7 @@ function preprocess(inputPath, opts = {}) {
 
   raw = checkDeepHeadings(raw);
 
-  const hooks = { report, onProgress: opts.onProgress, onLog: opts.onLog };
+  const hooks = { report, onProgress: opts.onProgress, onLog: opts.onLog, origFenceLines };
   const dirs = { mermaidDir: mermaidCacheDir, pumlDir: plantumlCacheDir, cleanDir };
 
   raw = renderMermaidBlocks(raw, dirs, baseName, hooks);
