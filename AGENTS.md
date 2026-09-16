@@ -1,6 +1,6 @@
 # AGENTS.md — md2docx 项目工作指南
 
-面向 AI 编码助手的项目约定与操作指南。与 `CLAUDE.md`（架构/命令说明）配合阅读；本文档聚焦 **「必须遵守的约定」「已知陷阱」「工作流程」「验证方法」**。
+面向 AI 编码助手的项目约定与操作指南，是本项目规则的**权威源**（`CLAUDE.md` 仅以 `@AGENTS.md` 引入本文件）。聚焦 **「必须遵守的约定」「已知陷阱」「工作流程」「验证方法」**。
 
 ## 项目概览
 
@@ -14,12 +14,17 @@ npm install                                            # 首次安装依赖
 node scripts/preprocess.js md/xxx.md                   # 阶段1：预处理 → md/output/clean/xxx.clean.md
 node scripts/md2docx.js md/output/clean/xxx.clean.md   # 阶段2：转 DOCX → md/output/docx/xxx.docx
 node scripts/build_template.js                         # 参考模板生成器（硬编码路径，不进流水线）
+
+# HTTP 服务（详见 docs/http-service.md 与 docs/api.md）
+node server/app.js                                     # 启动服务（默认 http://127.0.0.1:8080）
+PORT=8080 MAX_CONCURRENT=2 node server/app.js           # 可选环境变量（见 server/config.js）
 ```
 
 产物目录（均已被 .gitignore 忽略，勿提交）：
 - `md/output/clean/` — 预处理后 markdown
 - `md/output/docx/` — 最终 DOCX
 - `md/output/.mermaid/`、`md/output/.plantuml/` — 图表 PNG / 源文件缓存
+- `data/jobs/` — HTTP 服务作业工作目录（每作业一个子目录）
 
 ## 核心约定（必须遵守）
 
@@ -97,3 +102,5 @@ md2docx 转换时，mermaid 与 PlantUML 图表**默认注入灰阶/黑白主题
 2. 用 Word/LibreOffice 打开检查：章节编号、题注位置、表格跨页、横置大图、页码连续性（竖→横→竖）。
 3. 图表验证：检查 `md/output/.mermaid/`、`.plantuml/` 的 PNG 为黑白灰风格（无彩色）；用户显式配置主题的图保留彩色。
 4. 外部依赖：mmdc 需 Chrome/Chromium（`scripts/puppeteer-config.js` 自动探测）；PlantUML 需 Java + graphviz + `bin/plantuml.jar`（首次自动下载）。缺依赖时图表降级为代码块，不报致命错误。
+5. mmdc 按 `node_modules/.bin/mmdc` **直调二进制**（不走 `npx`，避免每次包解析开销，并发场景收益明显）——不要改回 `npx mmdc`。
+6. HTTP 服务：`node server/app.js` 起服务；`curl /api/health` 应返回全部依赖 ✓。前端 E2E 需本机 Chrome CDP：`NODE_PATH=$(npm root -g) node scripts/e2e-web.js`；无 CDP 环境时用 curl 走 API 全流程代替（见 `docs/api.md`）。
