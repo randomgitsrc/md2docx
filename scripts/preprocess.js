@@ -11,18 +11,35 @@
  *   5. Mermaid 代码块 → 渲染为 PNG，替换为图片引用
  *   6. 题注标记: 将 md 中已有的 "表 X-X 名称" / "图 X-X 名称" 转为加粗格式
  *
- * 用法:
- *   node preprocess.js <input.md> [output.md]
+ * 双入口:
+ *   - CLI:   node preprocess.js <input.md> [output.md]
+ *   - 编程:  const { preprocess } = require('./preprocess');
+ *            preprocess(inputPath, { cleanDir, mermaidCacheDir, ... })
+ *            （HTTP 服务经此入口复用，目录可参数化以隔离并发作业）
  */
 
 const fs = require('fs');
 const path = require('path');
 const { execSync } = require('child_process');
-const readline = require('readline');
 const matter = require('gray-matter');
 const yaml = require('js-yaml');
 const { generateConfig } = require('./puppeteer-config');
 const { renderPlantUML } = require('./plantuml-renderer');
+
+// =========================================================================
+// 0. 共享常量
+// =========================================================================
+
+// Mermaid 渲染分辨率（评审 L1：统一重试/常规分辨率，避免两处不一致）
+const MERMAID_WIDTH = 3600;
+const MERMAID_HEIGHT = 2400;
+const MERMAID_RETRY_WIDTH = 1600;
+const MERMAID_RETRY_HEIGHT = 900;
+
+// mmdc 二进制路径（评审 M7：直调二进制，消除 npx 每次包解析开销）
+function resolveMmdcBinary() {
+  return path.join(__dirname, '..', 'node_modules', '.bin', 'mmdc');
+}
 
 // =========================================================================
 // 0. 进度提示工具
@@ -81,7 +98,7 @@ function stripHeadingNumbers(content) {
 // =========================================================================
 // 2. YAML front matter 修正
 // =========================================================================
-function fixYamlFrontMatter(raw) {
+function fixYamlFrontMatter(raw, overrides = {}) {
   // 先去重 YAML 中的重复 key (js-yaml 不允许重复 key)
   const fmMatch = raw.match(/^---\n([\s\S]*?)\n---/);
   if (fmMatch) {
@@ -106,6 +123,12 @@ function fixYamlFrontMatter(raw) {
   if (!meta.title && meta.doc_title) {
     meta.title = meta.doc_title;
     delete meta.doc_title;
+  }
+  // 覆盖语义（评审 M8）：表单参数优先于 YAML（真覆盖）
+  if (overrides) {
+    if (overrides.title !== undefined) meta.title = overrides.title;
+    if (overrides.company !== undefined) meta.company = overrides.company;
+    if (overrides.date !== undefined) meta.date = overrides.date;
   }
   const yamlStr = yaml.dump(meta);
   return `---\n${yamlStr}---\n\n${parsed.content}`;
@@ -187,22 +210,8 @@ function fixMermaidCode(code) {
   }).join('\n');
 }
 
-// 交互式询问用户
-function askUser(question) {
-  return new Promise((resolve) => {
-    const rl = readline.createInterface({
-      input: process.stdin,
-      output: process.stdout,
-    });
-    rl.question(question, (answer) => {
-      rl.close();
-      resolve(answer.trim().toLowerCase());
-    });
-  });
-}
-
-function renderMermaidBlocks(content, inputDir, baseName) {
-  const mermaidDir = path.join(inputDir, 'output', '.mermaid');
+function renderMermaidBlocks(content, dirs, baseName, hooks = {}) {
+  const { mermaidDir, cleanDir } = dirs;
   if (!fs.existsSync(mermaidDir)) fs.mkdirSync(mermaidDir, { recursive: true });
 
   // 统计 mermaid 块数量
@@ -210,7 +219,8 @@ function renderMermaidBlocks(content, inputDir, baseName) {
   const total = mermaidMatches.length;
   if (total === 0) return content;
 
-  console.log(`[mermaid] 发现 ${total} 个 Mermaid 图`);
+  const report = hooks.report || console;
+  report.log(`[mermaid] 发现 ${total} 个 Mermaid 图`);
 
   let figureIndex = 0;
   let failedCount = 0;
@@ -231,6 +241,7 @@ function renderMermaidBlocks(content, inputDir, baseName) {
 
       figureIndex++;
       logRenderProgress('mermaid', figureIndex, total);
+      if (hooks.onProgress) hooks.onProgress(figureIndex / total * 100, `渲染 Mermaid 图 ${figureIndex}/${total}`);
 
       let mermaidCode = mermaidLines.join('\n');
 
@@ -251,15 +262,16 @@ function renderMermaidBlocks(content, inputDir, baseName) {
         fs.writeFileSync(mmdPath, mermaidCode);
         const cfgPath = generateConfig(mermaidDir);
         const cfgArg = cfgPath ? `-p ${cfgPath}` : '';
-        // 从 md2docx 项目目录执行 npx，确保能找到 mermaid-cli 依赖
-        const mmdcDir = path.resolve(__dirname, '..');
+        // 直调 mmdc 二进制（评审 M7），cwd 设为项目根以解析依赖
+        const mmdcBin = resolveMmdcBinary();
         execSync(
-          `npx mmdc -i "${mmdPath}" -o "${pngPath}" -b white -w 3600 -H 2400 ${cfgArg}`,
-          { stdio: 'pipe', timeout: 30000, cwd: mmdcDir }
+          `"${mmdcBin}" -i "${mmdPath}" -o "${pngPath}" -b white -w ${MERMAID_WIDTH} -H ${MERMAID_HEIGHT} ${cfgArg}`,
+          { stdio: 'pipe', timeout: 30000, cwd: path.resolve(__dirname, '..') }
         );
         rendered = fs.existsSync(pngPath);
       } catch (e) {
         logWarnDuringRender(`[mermaid] 渲染失败 (图${figureIndex}): ${e.message}`);
+        if (hooks.onLog) hooks.onLog(`[mermaid] 渲染失败 (图${figureIndex}): ${e.message}`);
         const issues = detectMermaidIssues(mermaidCode);
         if (issues.length > 0) {
           console.warn(`  [mermaid] 检测到可能的语法问题:`);
@@ -295,14 +307,15 @@ function renderMermaidBlocks(content, inputDir, baseName) {
           fs.writeFileSync(mmdPath, fixedCode);
           const cfgPath = generateConfig(mermaidDir);
           const cfgArg = cfgPath ? `-p ${cfgPath}` : '';
-          const mmdcDir = path.resolve(__dirname, '..');
+          const mmdcBin = resolveMmdcBinary();
           execSync(
-            `npx mmdc -i "${mmdPath}" -o "${pngPath}" -b white -w 1600 -H 900 ${cfgArg}`,
-            { stdio: 'pipe', timeout: 30000, cwd: mmdcDir }
+            `"${mmdcBin}" -i "${mmdPath}" -o "${pngPath}" -b white -w ${MERMAID_RETRY_WIDTH} -H ${MERMAID_RETRY_HEIGHT} ${cfgArg}`,
+            { stdio: 'pipe', timeout: 30000, cwd: path.resolve(__dirname, '..') }
           );
           rendered = fs.existsSync(pngPath);
           if (rendered) {
             console.warn(`  [mermaid] 修复成功，图${figureIndex} 已渲染`);
+            if (hooks.onLog) hooks.onLog(`[mermaid] 修复成功，图${figureIndex} 已渲染`);
           }
         } catch (e2) {
           console.warn(`  [mermaid] 修复后仍失败: ${e2.message}`);
@@ -311,8 +324,7 @@ function renderMermaidBlocks(content, inputDir, baseName) {
 
       if (rendered) {
         // 图片路径相对于 clean.md 输出目录
-        const cleanDir = path.join(inputDir, 'output', 'clean');
-        const relPath = path.relative(cleanDir, pngPath);
+        const relPath = path.relative(cleanDir, pngPath).replace(/\\/g, '/');
         result.push(`![图 ${figureIndex}](${relPath})`);
         result.push('');
       } else {
@@ -341,8 +353,8 @@ function renderMermaidBlocks(content, inputDir, baseName) {
 // =========================================================================
 // 6. PlantUML 代码块 → 渲染为 PNG
 // =========================================================================
-function renderPlantUMLBlocks(content, inputDir, baseName) {
-  const pumlDir = path.join(inputDir, 'output', '.plantuml');
+function renderPlantUMLBlocks(content, dirs, baseName, hooks = {}) {
+  const { pumlDir, cleanDir } = dirs;
   if (!fs.existsSync(pumlDir)) fs.mkdirSync(pumlDir, { recursive: true });
 
   // 统计 plantuml 块数量
@@ -350,7 +362,8 @@ function renderPlantUMLBlocks(content, inputDir, baseName) {
   const total = pumlMatches.length;
   if (total === 0) return content;
 
-  console.log(`[plantuml] 发现 ${total} 个 PlantUML 图`);
+  const report = hooks.report || console;
+  report.log(`[plantuml] 发现 ${total} 个 PlantUML 图`);
 
   let figureIndex = 0;
   let failedCount = 0;
@@ -371,6 +384,7 @@ function renderPlantUMLBlocks(content, inputDir, baseName) {
 
       figureIndex++;
       logRenderProgress('plantuml', figureIndex, total);
+      if (hooks.onProgress) hooks.onProgress(figureIndex / total * 100, `渲染 PlantUML 图 ${figureIndex}/${total}`);
 
       const pumlCode = pumlLines.join('\n');
 
@@ -392,11 +406,11 @@ function renderPlantUMLBlocks(content, inputDir, baseName) {
           errorMsg = errorMsg.replace(/第 \d+ 行/, `原始文件第 ${originalLine} 行`);
         }
         logWarnDuringRender(`[plantuml] 渲染失败 (图${figureIndex}): ${errorMsg}`);
+        if (hooks.onLog) hooks.onLog(`[plantuml] 渲染失败 (图${figureIndex}): ${errorMsg}`);
       }
 
       if (rendered) {
         // 图片路径相对于 clean.md 输出目录
-        const cleanDir = path.join(inputDir, 'output', 'clean');
         const relPath = path.relative(cleanDir, pngPath).replace(/\\/g, '/');
         result.push(`![](${relPath})`);
         result.push('');
@@ -464,7 +478,82 @@ function markCaptions(content) {
 }
 
 // =========================================================================
-// 主流程
+// 8. 可编程入口
+// =========================================================================
+// opts:
+//   outputDir         — 输出基础目录（默认 inputDir/output）
+//   cleanDir          — clean 输出目录（默认 outputDir/clean）
+//   mermaidCacheDir   — mermaid 缓存目录（默认 outputDir/.mermaid）
+//   plantumlCacheDir  — plantuml 缓存目录（默认 outputDir/.plantuml）
+//   onProgress        — (percent, message) 渲染进度回调（0-100）
+//   onLog             — (line) 日志行回调（额外，不影响 CLI 终端输出）
+//   overrides         — { title, company, date } YAML 覆盖（评审 M8）
+// 返回 { outputPath, cleanDir, stats: { mermaid, plantuml, failed }, warnings }
+function preprocess(inputPath, opts = {}) {
+  const inputDir = path.dirname(path.resolve(inputPath));
+  const docName = path.basename(inputPath).replace(/\.md$/i, '');
+
+  const baseOutputDir = opts.outputDir || path.join(inputDir, 'output');
+  const cleanDir = opts.cleanDir || path.join(baseOutputDir, 'clean');
+  const mermaidCacheDir = opts.mermaidCacheDir || path.join(baseOutputDir, '.mermaid');
+  const plantumlCacheDir = opts.plantumlCacheDir || path.join(baseOutputDir, '.plantuml');
+
+  const outputPath = path.join(cleanDir, `${docName}.clean.md`);
+
+  if (!fs.existsSync(inputPath)) {
+    throw new Error(`输入文件不存在: ${inputPath}`);
+  }
+
+  const baseName = path.basename(inputPath, '.md').replace(/[^a-zA-Z0-9一-鿿]/g, '_');
+  const warnings = [];
+
+  const report = opts.report || console;
+  report.log(`[preprocess] 输入: ${inputPath}`);
+
+  let raw = fs.readFileSync(inputPath, 'utf-8');
+
+  raw = fixYamlFrontMatter(raw, opts.overrides);
+  report.log('[preprocess] 1. YAML front matter 已修正');
+  if (opts.onProgress) opts.onProgress(10, '修正 YAML front matter');
+
+  raw = stripHeadingNumbers(raw);
+  report.log('[preprocess] 2. 标题自带编号已剥离');
+  if (opts.onProgress) opts.onProgress(20, '剥离标题编号');
+
+  raw = checkDeepHeadings(raw);
+
+  const hooks = { report, onProgress: opts.onProgress, onLog: opts.onLog };
+  const dirs = { mermaidDir: mermaidCacheDir, pumlDir: plantumlCacheDir, cleanDir };
+
+  raw = renderMermaidBlocks(raw, dirs, baseName, hooks);
+  report.log('[preprocess] 3. Mermaid 图表已渲染');
+  if (opts.onProgress) opts.onProgress(50, '渲染 Mermaid 图表');
+
+  raw = renderPlantUMLBlocks(raw, dirs, baseName, hooks);
+  report.log('[preprocess] 4. PlantUML 图表已渲染');
+  if (opts.onProgress) opts.onProgress(70, '渲染 PlantUML 图表');
+
+  raw = stripBulletManualNumbers(raw);
+  report.log('[preprocess] 5. 列表手动编号已剥离');
+  if (opts.onProgress) opts.onProgress(85, '剥离列表编号');
+
+  raw = markCaptions(raw);
+  report.log('[preprocess] 6. 题注已标记为加粗');
+  if (opts.onProgress) opts.onProgress(95, '标记题注');
+
+  raw = raw.replace(/\n{4,}/g, '\n\n\n');
+
+  if (!fs.existsSync(cleanDir)) fs.mkdirSync(cleanDir, { recursive: true });
+
+  fs.writeFileSync(outputPath, raw, 'utf-8');
+  report.log(`[preprocess] 输出: ${outputPath}`);
+  if (opts.onProgress) opts.onProgress(100, '预处理完成');
+
+  return { outputPath, cleanDir, warnings };
+}
+
+// =========================================================================
+// 9. CLI 入口
 // =========================================================================
 function main() {
   const args = process.argv.slice(2);
@@ -479,44 +568,21 @@ function main() {
   const defaultOutput = path.join(inputDir, 'output', 'clean', `${docName}.clean.md`);
   const outputPath = args[1] || defaultOutput;
 
-  if (!fs.existsSync(inputPath)) {
-    console.error(`输入文件不存在: ${inputPath}`);
+  try {
+    const result = preprocess(inputPath, {});
+    if (args[1] && result.outputPath !== outputPath) {
+      // CLI 显式指定 output 时，把文件移动到指定位置
+      fs.copyFileSync(result.outputPath, outputPath);
+    }
+  } catch (e) {
+    console.error(`错误: ${e.message}`);
     process.exit(1);
   }
-
-  const baseName = path.basename(inputPath, '.md').replace(/[^a-zA-Z0-9一-鿿]/g, '_');
-
-  console.log(`[preprocess] 输入: ${inputPath}`);
-
-  let raw = fs.readFileSync(inputPath, 'utf-8');
-
-  raw = fixYamlFrontMatter(raw);
-  console.log('[preprocess] 1. YAML front matter 已修正');
-
-  raw = stripHeadingNumbers(raw);
-  console.log('[preprocess] 2. 标题自带编号已剥离');
-
-  raw = checkDeepHeadings(raw);
-
-  raw = renderMermaidBlocks(raw, inputDir, baseName);
-  console.log('[preprocess] 3. Mermaid 图表已渲染');
-
-  raw = renderPlantUMLBlocks(raw, inputDir, baseName);
-  console.log('[preprocess] 4. PlantUML 图表已渲染');
-
-  raw = stripBulletManualNumbers(raw);
-  console.log('[preprocess] 5. 列表手动编号已剥离');
-
-  raw = markCaptions(raw);
-  console.log('[preprocess] 6. 题注已标记为加粗');
-
-  raw = raw.replace(/\n{4,}/g, '\n\n\n');
-
-  const outputDir = path.dirname(outputPath);
-  if (!fs.existsSync(outputDir)) fs.mkdirSync(outputDir, { recursive: true });
-
-  fs.writeFileSync(outputPath, raw, 'utf-8');
-  console.log(`[preprocess] 输出: ${outputPath}`);
 }
 
-main();
+// 仅作为 CLI 直接执行时运行 main（HTTP 服务 require 本文件不触发）
+if (require.main === module) {
+  main();
+}
+
+module.exports = { preprocess };

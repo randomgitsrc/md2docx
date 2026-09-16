@@ -1199,30 +1199,33 @@ doc.save(sys.argv[1])
 }
 
 // =========================================================================
-// 7. CLI 入口
+// 7. 可编程入口 + CLI 入口
 // =========================================================================
 
-async function main() {
-  const args = process.argv.slice(2);
-  if (args.length < 1) {
-    console.error('用法: node md2docx.js <input.md> [output.docx]');
-    process.exit(1);
-  }
-
-  const inputPath = args[0];
+// convert(cleanPath, opts) — 可编程 API（HTTP 服务经此复用）
+// opts:
+//   outputBase     — 输出基础目录（默认自动推导）
+//   srcDir         — 图片引用解析目录（默认 outputBase）
+//   outputPath     — 显式指定输出 docx 路径（默认 outputBase/output/docx/）
+//   onProgress     — (percent, message) 进度回调（0-100）
+//   onLog          — (line) 日志行回调
+// 返回 { outputPath, stats: { paragraphs, images, tables } }
+async function convert(cleanPath, opts = {}) {
+  const inputPath = cleanPath;
   const inputDir = path.dirname(path.resolve(inputPath));
   // 判断是否在 output/clean/ 目录下,自动定位到 output/docx/
   const isInOutputClean = inputDir.endsWith(path.join('output', 'clean')) ||
                            inputDir.endsWith(path.join('output', 'clean') + path.sep);
-  const outputBase = isInOutputClean ? path.resolve(inputDir, '..', '..') : inputDir;
-  const srcDir = isInOutputClean ? outputBase : inputDir;
+  const outputBase = opts.outputBase || (isInOutputClean ? path.resolve(inputDir, '..', '..') : inputDir);
+  const srcDir = opts.srcDir || (isInOutputClean ? outputBase : inputDir);
   const docName = path.basename(inputPath).replace(/\.clean\.md$/i, '.md').replace(/\.md$/i, '');
   const defaultOutput = path.join(outputBase, 'output', 'docx', `${docName}.docx`);
-  const outputPath = args[1] || defaultOutput;
+  const outputPath = opts.outputPath || defaultOutput;
+
+  const report = opts.report || console;
 
   if (!fs.existsSync(inputPath)) {
-    console.error(`输入文件不存在: ${inputPath}`);
-    process.exit(1);
+    throw new Error(`输入文件不存在: ${inputPath}`);
   }
 
   const raw = fs.readFileSync(inputPath, 'utf-8');
@@ -1248,10 +1251,11 @@ async function main() {
     content = content.replace(/^#\s+.+$/gm, '').replace(/^\n+/, '');
   }
 
-  console.log(`[md2docx] 输入: ${inputPath}`);
-  console.log(`[md2docx] 文档标题: ${docTitle || '(未设置)'}`);
-  console.log(`[md2docx] 公司: ${meta.company || '(未设置)'}`);
-  console.log(`[md2docx] 日期: ${meta.date || '(未设置)'}`);
+  report.log(`[md2docx] 输入: ${inputPath}`);
+  report.log(`[md2docx] 文档标题: ${docTitle || '(未设置)'}`);
+  report.log(`[md2docx] 公司: ${meta.company || '(未设置)'}`);
+  report.log(`[md2docx] 日期: ${meta.date || '(未设置)'}`);
+  if (opts.onProgress) opts.onProgress(5, '解析 YAML front matter');
 
   // 预扫描：统计顶层列表数量，动态确定列表池大小
   const listCount = countTopLevelLists(content);
@@ -1261,9 +1265,10 @@ async function main() {
   // 转换正文
   const converter = new Md2DocxConverter({ inputDir, srcDir, listPoolSize });
   const converterSections = converter.convert(content);
-  console.log(`[md2docx] 正文段落/元素数: ${converterSections.reduce((sum, sec) => sum + sec.children.length, 0)}`);
-  console.log(`[md2docx] 嵌入图片: ${converter.imageIndex} 个`);
-  console.log(`[md2docx] 自动表注: ${converter.tableIndex} 个`);
+  if (opts.onProgress) opts.onProgress(70, '解析并转换正文');
+  report.log(`[md2docx] 正文段落/元素数: ${converterSections.reduce((sum, sec) => sum + sec.children.length, 0)}`);
+  report.log(`[md2docx] 嵌入图片: ${converter.imageIndex} 个`);
+  report.log(`[md2docx] 自动表注: ${converter.tableIndex} 个`);
 
   // 装配正文 sections
   const bodySections = converterSections.map((sec, idx) => {
@@ -1323,10 +1328,38 @@ async function main() {
   // 后处理: 注入 XML 属性防止表格跨页时题注+表头单独出现在页底
   patchDocxPagination(outputPath);
   const finalSize = fs.statSync(outputPath).size;
-  console.log(`[md2docx] 已生成: ${outputPath} (${(finalSize / 1024).toFixed(1)} KB)`);
+  report.log(`[md2docx] 已生成: ${outputPath} (${(finalSize / 1024).toFixed(1)} KB)`);
+  if (opts.onProgress) opts.onProgress(100, 'DOCX 生成完成');
+
+  return {
+    outputPath,
+    stats: {
+      paragraphs: converterSections.reduce((sum, sec) => sum + sec.children.length, 0),
+      images: converter.imageIndex,
+      tables: converter.tableIndex,
+      sizeBytes: finalSize,
+    },
+  };
 }
 
-main().catch(err => {
-  console.error('错误:', err);
-  process.exit(1);
-});
+// ---- CLI 入口 ----
+async function main() {
+  const args = process.argv.slice(2);
+  if (args.length < 1) {
+    console.error('用法: node md2docx.js <input.md> [output.docx]');
+    process.exit(1);
+  }
+  try {
+    await convert(args[0], args[1] ? { outputPath: args[1] } : {});
+  } catch (e) {
+    console.error(`错误: ${e.message}`);
+    process.exit(1);
+  }
+}
+
+// 仅作为 CLI 直接执行时运行 main（HTTP 服务 require 本文件不触发）
+if (require.main === module) {
+  main();
+}
+
+module.exports = { convert, Md2DocxConverter };

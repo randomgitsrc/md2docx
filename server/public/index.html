@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>md2docx 在线转换</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="topbar">
+    <h1>md2docx <span class="sub">Markdown → Word 文档转换服务</span></h1>
+    <div class="deps" id="deps-badges" title="运行时依赖状态">
+      <span class="dep loading" id="dep-node">Node …</span>
+      <span class="dep loading" id="dep-chrome">Chrome …</span>
+      <span class="dep loading" id="dep-java">Java …</span>
+      <span class="dep loading" id="dep-graphviz">Graphviz …</span>
+      <span class="dep loading" id="dep-python">Python …</span>
+      <span class="dep loading" id="dep-pythonDocx">python-docx …</span>
+    </div>
+  </header>
+
+  <main class="container">
+    <!-- 上传区 -->
+    <section class="card upload-card" id="upload-card">
+      <div class="dropzone" id="dropzone">
+        <div class="dz-icon">📄</div>
+        <p class="dz-title">拖拽 Markdown 文件到这里，或点击选择</p>
+        <p class="dz-hint">支持 .md，最大 20MB；mermaid / plantuml 图表自动渲染</p>
+        <input type="file" id="file-input" accept=".md" hidden>
+      </div>
+      <div class="meta-fields">
+        <input type="text" id="field-title" placeholder="文档标题（可选，覆盖 YAML title）">
+        <input type="text" id="field-company" placeholder="公司/部门（可选）">
+        <input type="text" id="field-date" placeholder="日期（可选，如 2026年8月）">
+      </div>
+      <button class="btn btn-primary" id="btn-submit" disabled>开始转换</button>
+    </section>
+
+    <!-- 进度区（提交后显示） -->
+    <section class="card progress-card" id="progress-card" hidden>
+      <div class="progress-head">
+        <span id="progress-filename" class="filename"></span>
+        <span class="status-chip" id="status-chip">排队中</span>
+      </div>
+      <div class="progress-track"><div class="progress-fill" id="progress-fill" style="width:0%"></div></div>
+      <div class="progress-meta">
+        <span id="progress-percent">0%</span>
+        <span id="progress-message" class="muted">等待队列…</span>
+      </div>
+      <div class="actions">
+        <a class="btn btn-success" id="btn-download" hidden>⬇ 下载 DOCX</a>
+        <a class="btn btn-ghost" id="btn-clean" hidden>下载 clean.md</a>
+        <button class="btn btn-danger" id="btn-delete" hidden>删除作业</button>
+      </div>
+      <div class="warnings" id="warnings" hidden></div>
+      <details class="logs">
+        <summary>处理日志</summary>
+        <pre id="logs"></pre>
+      </details>
+    </section>
+
+    <!-- 作业列表 -->
+    <section class="card jobs-card" id="jobs-card">
+      <h2>最近作业</h2>
+      <table class="jobs-table">
+        <thead><tr><th>ID</th><th>文件名</th><th>状态</th><th>进度</th><th>创建时间</th><th>操作</th></tr></thead>
+        <tbody id="jobs-body"><tr><td colspan="6" class="muted">暂无作业</td></tr></tbody>
+      </table>
+    </section>
+  </main>
+
+  <footer class="footer">
+    md2docx HTTP 服务 · 复用项目核心流水线 · <a href="/api/health">/api/health</a>
+  </footer>
+
+  <script src="app.js"></script>
+</body>
+</html>
