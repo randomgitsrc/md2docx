@@ -133,6 +133,53 @@ function ensureEndMarker(code) {
   return { code: `${code.replace(/\s*$/, '')}\n@end${type}\n`, fixed: `@end${type}` };
 }
 
+// 自动为「名称含特殊字符但未加引号」的组件/节点名补引号。
+// 名称里的 - ( ) / 等字符不加引号会被 PlantUML 当作运算符/表达式解析而渲染失败：
+//   `c3 as 服务进程通信(消息队列)`  → `c3 as "服务进程通信(消息队列)"`
+//   `c7 as 无效值/保留位处理`      → `c7 as "无效值/保留位处理"`
+//   `sjwz --> GMS-DM-BWJC : 告警`  → `sjwz --> "GMS-DM-BWJC" : 告警`
+// 仅在渲染失败后作为补救尝试，成功才采用，因此不影响本来正常的图。
+// @returns {string|null} 修复后的代码；无需修复时返回 null
+function fixUnquotedNames(code) {
+  const NEEDS_QUOTE = /[-()/]/;
+  // 判断某 token 是否为箭头（全部由运算符字符组成且含 < > =）
+  const isArrow = (t) => /^[<>=.|*o-]{2,}$/.test(t) && /[<>=]/.test(t);
+  const quoteTok = (t) => {
+    if (!t || /^".*"$/.test(t) || !NEEDS_QUOTE.test(t)) return null;
+    return `"${t}"`;
+  };
+
+  let changed = false;
+  const lines = code.split('\n').map(line => {
+    // 形式 A：`别名 as 名称`（如 c3 as 服务进程通信(消息队列)）
+    let m = line.match(/^(\s*)(\S+)(\s+as\s+)(.+?)(\s*)$/i);
+    if (m) {
+      const q = quoteTok(m[4]);
+      if (q) { changed = true; return `${m[1]}${m[2]}${m[3]}${q}${m[5]}`; }
+      return line;
+    }
+    // 形式 B：`关键字 名称 as 别名`（如 component GMS-DM-BWJC as x）
+    m = line.match(/^(\s*)([A-Za-z]\w*)(\s+)(\S+)(\s+as\s+)(\S+)(\s*)$/);
+    if (m) {
+      const q = quoteTok(m[4]);
+      if (q) { changed = true; return `${m[1]}${m[2]}${m[3]}${q}${m[5]}${m[6]}${m[7]}`; }
+      return line;
+    }
+    // 形式 C：`左 箭头 右 [: 标签]`（如 sjwz --> GMS-DM-BWJC : 告警）
+    m = line.match(/^(\s*)(\S+)(\s+)(\S+)(\s+)(\S+)((?:\s*:.*)?)(\s*)$/);
+    if (m && isArrow(m[4])) {
+      const ql = quoteTok(m[2]);
+      const qr = quoteTok(m[6]);
+      if (ql || qr) {
+        changed = true;
+        return `${m[1]}${ql || m[2]}${m[3]}${m[4]}${m[5]}${qr || m[6]}${m[7]}${m[8]}`;
+      }
+    }
+    return line;
+  });
+  return changed ? lines.join('\n') : null;
+}
+
 // 检测系统可用中文字体，返回 PlantUML 可用的字体名
 let cachedChineseFont = null;
 function findChineseFont() {
@@ -264,23 +311,38 @@ function renderPlantUML(code, tmpDir, index) {
   // 3. 执行渲染
   const cmd = buildCommand(puml, inFile, tmpDir);
   let renderStderr = '';
+  let rendered = false;
   try {
     const res = execSync(cmd, { stdio: 'pipe', timeout: 30000 });
     if (res && res.stderr) renderStderr = res.stderr.toString();
+    rendered = true;
   } catch (e) {
-    // 渲染失败：尝试自动修复多 else 语法问题（基于原始代码，再注入字体）
-    const fixedCode = fixMultiElse(baseCode);
-    if (fixedCode) {
-      const fixedWithFont = injectChineseFont(injectTheme(fixedCode));
+    // 渲染失败：依次尝试已知的自动修复（均基于原始代码，再注入字体）。
+    // 只在失败后作为补救，成功才采用，因此不会影响本来正常的图。
+    const candidates = [
+      { label: '多 else 语法', code: fixMultiElse(baseCode) },
+      { label: '名称加引号',   code: fixUnquotedNames(baseCode) },
+    ];
+    let lastFailure = null;
+    for (const c of candidates) {
+      if (!c.code) continue;
+      const fixedWithFont = injectChineseFont(injectTheme(c.code));
       fs.writeFileSync(inFile, fixedWithFont, 'utf8');
       try {
         execSync(cmd, { stdio: 'pipe', timeout: 30000 });
-        console.warn(`[plantuml] 图${index}: 自动修复多 else 语法后渲染成功`);
+        console.warn(`[plantuml] 图${index}: 自动修复（${c.label}）后渲染成功`);
+        rendered = true;
+        break;
       } catch (e2) {
-        // 修复后仍失败，用修复后的代码报告错误
-        throw buildRenderError(e2, fixedCode, fixedWithFont.split('\n').length - fixedCode.split('\n').length);
+        lastFailure = {
+          err: e2,
+          code: c.code,
+          offset: fixedWithFont.split('\n').length - c.code.split('\n').length,
+        };
       }
-    } else {
+    }
+    if (!rendered) {
+      if (lastFailure) throw buildRenderError(lastFailure.err, lastFailure.code, lastFailure.offset);
       throw buildRenderError(e, baseCode, codeWithFont.split('\n').length - baseCode.split('\n').length);
     }
   }

@@ -283,6 +283,18 @@ function fitImageToLandscape(origW, origH) {
   return { width: w, height: h };
 }
 
+// 题注判定（供两处 Caption 分支复用）
+// 规则必须与 preprocess.js 的 markCaptions 保持一致（双路一致）：
+//   以「图/表 + 可选空格 + 编号」开头（编号可为 1-1 / 3.2 / 89），
+//   整段 < 60 字符，且不以句末标点结尾（否则是正文句子）。
+function isCaptionText(text) {
+  const s = (text || '').trim();
+  if (!s || s.length >= 60) return false;
+  if (!/^[图表]\s*\d/.test(s)) return false;
+  if (/[。！？；，、：]$/.test(s)) return false;
+  return true;
+}
+
 // 统计 markdown 中顶层列表数量（用于动态确定列表池大小）
 // 顶层列表 = 不缩进的 `- ` 或 `* ` 开头的连续行块
 // 统计所有列表（顶层 + 嵌套 + 有序 + 无序）的数量。
@@ -393,8 +405,8 @@ class Md2DocxConverter {
           children[first].type === 'strong_open' &&
           children[last].type === 'strong_close';
         const fullText = this.flattenInlineToText(inline);
-        const captionMatch = fullText.match(/^[图表]\s+\S/);
-        if (isAllBoldWrapped && captionMatch && fullText.length < 60) {
+        const captionMatch = isCaptionText(fullText);
+        if (isAllBoldWrapped && captionMatch) {
           // 是 Caption，push 到 currentSection（landscape），然后恢复竖置
           const captionPara = new Paragraph({
             style: 'Caption',
@@ -468,9 +480,9 @@ class Md2DocxConverter {
             children[first].type === 'strong_open' &&
             children[last].type === 'strong_close';
           const fullText = this.flattenInlineToText(inline);
-          const captionMatch = fullText.match(/^[图表]\s+\S/);
+          const captionMatch = isCaptionText(fullText);
 
-          if (isAllBoldWrapped && captionMatch && fullText.length < 60) {
+          if (isAllBoldWrapped && captionMatch) {
             const captionPara = new Paragraph({
               style: 'Caption',
               children: [new TextRun({
@@ -1249,7 +1261,9 @@ async function convert(cleanPath, opts = {}) {
     throw new Error(`输入文件不存在: ${inputPath}`);
   }
 
-  const raw = fs.readFileSync(inputPath, 'utf-8');
+  // 统一换行符为 LF：CRLF 会让不带 m 标志的 `...$` 正则失配
+  // （JS 中 `.` 不匹配 `\r`），与 preprocess 保持一致。
+  const raw = fs.readFileSync(inputPath, 'utf-8').replace(/\r\n?/g, '\n');
   // 解析 YAML front matter
   const parsed = matter(raw);
   const meta = parsed.data || {};

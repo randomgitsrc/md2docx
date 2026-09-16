@@ -461,24 +461,101 @@ function stripBulletManualNumbers(content) {
 //   **图 3-1 安装流程图**
 // 这样 md2docx.js 可以识别并格式化为题注段落
 
-const CAPTION_RE = /^(表|图)\s+(\d+-\d+)\s+(.+)$/;
-// 也匹配无名称的题注: "表 1-1" 或 "图 3-1"
-const CAPTION_NUM_ONLY_RE = /^(表|图)\s+(\d+-\d+)$/;
+// 题注识别
+// ----------
+// 仅靠"图/表 + 编号"的字面模式判断会大量误判正文，例如：
+//   图3显示了系统架构 / 表2中列出了参数取值 / 表 3-1 列出了主要参数
+// 这些都会被字面规则吃成"题注"并被居中，属于静默破坏文档样式。
+//
+// 因此以**结构位置**为主判据（这也正是本项目的题注约定：图注在图下方、表注在表上方）：
+//   表题注 → 向下跳过空行与其他题注行后，首个内容是表格行（`|` 开头）
+//   图题注 → 向上跳过空行与其他题注行后，首个内容是图片引用（`![`）或代码块围栏
+//            （围栏对应"图表渲染失败降级为代码块"的情形）
+// 「跳过其他题注行」是为了支持双行题注（如 `表89 描述性标题` + `表 3-364` 编号行）。
+//
+// 兼容：仍保留旧的严格形式 `表 1-1 名称`（必须有空格 + 章节号）作为非相邻兜底，
+//       但要求名称不以常见正文承接词开头，避免 `表 3-1 列出了主要参数` 这类误判。
+//
+// 需要强制指定时：手工写成 `**表 1-1 名称**` 即可（已加粗的行直接放行，
+// md2docx 的 isCaptionText 会据此识别，不依赖相邻判断）。
+const CAPTION_RE = /^(?:>\s*)?(表|图)\s*(\d+(?:[-.．]\d+)*)\s*(.*)$/;
+const CAPTION_LEGACY_RE = /^(?:>\s*)?(表|图)\s+\d+-\d+(\s|$)/;
+const CAPTION_PROSE_TAIL_RE = /[。！？；，、：]$/;
+// 正文承接词：题注名称一般不会以此开头，而正文句子常以此接续编号
+const CAPTION_PROSE_HEAD_RE = /^(中|所|给|如|为|是|列|说|描|显|示|该|其|由|从|在)/;
+const CAPTION_MAX_LEN = 60;
 
 function markCaptions(content) {
-  return content.split('\n').map(line => {
-    const m = line.match(CAPTION_RE);
-    if (m) {
-      // 已是加粗则跳过
-      if (line.startsWith('**') && line.endsWith('**')) return line;
-      return `**${m[1]} ${m[2]} ${m[3]}**`;
+  const lines = content.split('\n');
+
+  // 去掉行内 ** 与引用块前缀后再匹配：
+  // 形如 `> 表 **168**名称`（编号被作者加粗）会破坏编号模式，导致漏识别；
+  // 题注本身用黑体样式，行内加粗是冗余的，去掉不影响呈现。
+  const normalize = (line) => line.replace(/^>\s*/, '').replace(/\*\*/g, '').trim();
+
+  // 是否"长得像题注"（不含相邻性判断）
+  const captionLike = (line) => {
+    if (!line || /^\s/.test(line)) return false;
+    if (line.startsWith('**') && line.endsWith('**')) return false;  // 已整体加粗 → 直接放行
+    if (line.length >= CAPTION_MAX_LEN) return false;
+    const m = normalize(line).match(CAPTION_RE);
+    if (!m) return false;
+    const name = (m[3] || '').trim();
+    if (name && CAPTION_PROSE_TAIL_RE.test(name)) return false;
+    return true;
+  };
+
+  const kindOf = (i) => {
+    if (i < 0 || i >= lines.length) return 'eof';
+    const l = lines[i].trim();
+    if (!l) return 'blank';
+    if (l.startsWith('|')) return 'table';
+    if (l.includes('![')) return 'image';
+    if (l.startsWith('```')) return 'fence';
+    if (captionLike(l)) return 'caption';
+    return 'text';
+  };
+
+  // 向下跳过空行与其他题注行，首个内容是否为表格。
+  // 题注行最多跳 2 个（覆盖"描述行 + 编号行"的双行题注）；不设上限时，
+  // 连续形似题注的正文段落会被整段跳过，导致链尾落在表格上而误判。
+  const MAX_CAPTION_CHAIN = 2;
+  const forwardHitsTable = (i) => {
+    let j = i + 1;
+    let skipped = 0;
+    while (j < lines.length && kindOf(j) === 'blank') j++;
+    while (j < lines.length && kindOf(j) === 'caption' && skipped < MAX_CAPTION_CHAIN) {
+      skipped++;
+      j++;
+      while (j < lines.length && kindOf(j) === 'blank') j++;
     }
-    const m2 = line.match(CAPTION_NUM_ONLY_RE);
-    if (m2) {
-      if (line.startsWith('**') && line.endsWith('**')) return line;
-      return `**${m2[1]} ${m2[2]}**`;
+    return kindOf(j) === 'table';
+  };
+
+  // 向上跳过空行与其他题注行，首个内容是否为图片或代码块围栏
+  const backwardHitsFigure = (i) => {
+    let j = i - 1;
+    let skipped = 0;
+    while (j >= 0 && kindOf(j) === 'blank') j--;
+    while (j >= 0 && kindOf(j) === 'caption' && skipped < MAX_CAPTION_CHAIN) {
+      skipped++;
+      j--;
+      while (j >= 0 && kindOf(j) === 'blank') j--;
     }
-    return line;
+    const k = kindOf(j);
+    return k === 'image' || k === 'fence';
+  };
+
+  return lines.map((line, i) => {
+    if (!captionLike(line)) return line;
+    const norm = normalize(line);
+    const m = norm.match(CAPTION_RE);
+    const name = (m[3] || '').trim();
+    const adjacent = forwardHitsTable(i) || backwardHitsFigure(i);
+    const legacy = CAPTION_LEGACY_RE.test(norm) && !CAPTION_PROSE_HEAD_RE.test(name);
+    if (!adjacent && !legacy) return line;
+    // 输出去掉引用块前缀与行内 **（题注应为居中段落，不是引用/行内加粗样式）
+    return `**${norm}**`;
   }).join('\n');
 }
 
@@ -516,6 +593,12 @@ function preprocess(inputPath, opts = {}) {
   report.log(`[preprocess] 输入: ${inputPath}`);
 
   let raw = fs.readFileSync(inputPath, 'utf-8');
+
+  // 统一换行符为 LF（必须在任何行级正则之前）。
+  // 陷阱：Windows 文档是 CRLF，而 JS 正则中 `.` 不匹配 `\r`（属行终止符），
+  // 未带 m 标志的 `...$` 会因行尾残留 `\r` 而失配，导致题注标记、标题编号
+  // 剥离、列表编号剥离等行级规则**静默失效**（不报错，只是没生效）。
+  raw = raw.replace(/\r\n?/g, '\n');
 
   // 记录原始文件中每个 plantuml 围栏的行号（按出现顺序，1-based）。
   // 后续变换（YAML 重排、mermaid 渲染）会改变行数，报错行号必须据此换算回原文，
