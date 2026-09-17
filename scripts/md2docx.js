@@ -1281,9 +1281,12 @@ async function convert(cleanPath, opts = {}) {
     throw new Error(`输入文件不存在: ${inputPath}`);
   }
 
-  // 统一换行符为 LF：CRLF 会让不带 m 标志的 `...$` 正则失配
-  // （JS 中 `.` 不匹配 `\r`），与 preprocess 保持一致。
-  const raw = fs.readFileSync(inputPath, 'utf-8').replace(/\r\n?/g, '\n');
+  // 统一换行符为 LF + 剥离 BOM，与 preprocess 一致：
+  //   CRLF → 不带 m 标志的 `...$` 正则失配（JS 中 `.` 不匹配 `\r`）
+  //   BOM  → 行首 U+FEFF 会让 `^---` 之类锚定匹配失效
+  const raw = fs.readFileSync(inputPath, 'utf-8')
+    .replace(/^\uFEFF/, '')
+    .replace(/\r\n?/g, '\n');
   // 解析 YAML front matter
   const parsed = matter(raw);
   const meta = parsed.data || {};

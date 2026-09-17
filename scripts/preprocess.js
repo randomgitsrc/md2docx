@@ -600,11 +600,14 @@ function preprocess(inputPath, opts = {}) {
 
   let raw = fs.readFileSync(inputPath, 'utf-8');
 
-  // 统一换行符为 LF（必须在任何行级正则之前）。
-  // 陷阱：Windows 文档是 CRLF，而 JS 正则中 `.` 不匹配 `\r`（属行终止符），
-  // 未带 m 标志的 `...$` 会因行尾残留 `\r` 而失配，导致题注标记、标题编号
-  // 剥离、列表编号剥离等行级规则**静默失效**（不报错，只是没生效）。
-  raw = raw.replace(/\r\n?/g, '\n');
+  // 统一换行符为 LF + 剥离 BOM（必须在任何行级正则之前）。
+  // 陷阱 1：Windows 文档是 CRLF，而 JS 正则中 `.` 不匹配 `\r`（属行终止符），
+  //   未带 m 标志的 `...$` 会因行尾残留 `\r` 而失配，导致题注标记、标题编号
+  //   剥离、列表编号剥离等行级规则**静默失效**（不报错，只是没生效）。
+  // 陷阱 2：Windows 记事本「UTF-8」另存会写 BOM。行首的 U+FEFF 会让
+  //   `^---\n`（YAML 去重的前置判断）不匹配，于是"去重复 key"的保险被跳过，
+  //   随后 gray-matter 对重复 title 直接报 `duplicated mapping key` 而失败。
+  raw = raw.replace(/^\uFEFF/, '').replace(/\r\n?/g, '\n');
 
   // 记录原始文件中每个 plantuml 围栏的行号（按出现顺序，1-based）。
   // 后续变换（YAML 重排、mermaid 渲染）会改变行数，报错行号必须据此换算回原文，

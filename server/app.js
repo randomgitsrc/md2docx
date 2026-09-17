@@ -108,13 +108,51 @@ function createApp(overrides = {}) {
 // 直接运行时启动服务（require 时不启动，便于测试）
 if (require.main === module) {
   const { app, deps } = createApp();
-  app.listen(config.port, config.host, () => {
-    logger.info(`md2docx HTTP 服务已启动: http://${config.host}:${config.port}`);
-    logger.info(`  Web 页面: http://localhost:${config.port}/`);
-    logger.info(`  作业目录: ${config.jobsDir}（并发上限 ${config.maxConcurrent}）`);
-    // 启动时探测依赖（预热缓存，M5）
-    deps.probe();
+
+  // 端口被占用时自动向后找一个空闲端口（离线单机上 8080 常被占用，
+  // 若直接失败用户只会看到"页面打不开"）。PORT=0 表示交给系统分配。
+  const net = require('net');
+  const probePort = (port) => new Promise((resolve) => {
+    const srv = net.createServer();
+    srv.once('error', () => resolve(false));
+    srv.once('listening', () => srv.close(() => resolve(true)));
+    srv.listen(port, config.host);
   });
+
+  (async () => {
+    let port = config.port;
+    if (port !== 0) {
+      const maxTry = 20;
+      for (let i = 0; i < maxTry; i++) {
+        if (await probePort(port + i)) { port = port + i; break; }
+        if (i === maxTry - 1) {
+          logger.warn(`[app] ${config.port}~${config.port + maxTry - 1} 均被占用，改由系统分配端口`);
+          port = 0;
+        }
+      }
+    }
+
+    const server = app.listen(port, config.host, () => {
+      const actual = server.address().port;
+      const url = `http://${config.host === '0.0.0.0' ? 'localhost' : config.host}:${actual}/`;
+      logger.info(`md2docx HTTP 服务已启动: ${url}`);
+      logger.info(`  作业目录: ${config.jobsDir}（并发上限 ${config.maxConcurrent}）`);
+      // 供启动脚本/桌面端读取实际端口（避免硬编码 8080 打不开）
+      try {
+        fs.mkdirSync(config.dataDir, { recursive: true });
+        fs.writeFileSync(path.join(config.dataDir, 'server-url.txt'), url, 'utf8');
+      } catch (_) { /* 非致命 */ }
+      // 启动时探测依赖（预热缓存，M5）
+      deps.probe();
+      // 自动打开浏览器（离线一键启动时用；设 NO_OPEN_BROWSER=1 可关闭）
+      if (process.env.NO_OPEN_BROWSER !== '1' && process.env.MD2DOCX_OPEN_BROWSER === '1') {
+        const { runFile } = require('../scripts/exec-util');
+        if (process.platform === 'win32') runFile('cmd', ['/c', 'start', '', url], { allowFailure: true });
+        else if (process.platform === 'darwin') runFile('open', [url], { allowFailure: true });
+        else runFile('xdg-open', [url], { allowFailure: true });
+      }
+    });
+  })();
 }
 
 module.exports = { createApp };

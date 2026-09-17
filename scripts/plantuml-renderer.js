@@ -364,6 +364,13 @@ function renderPlantUML(code, tmpDir, index) {
   const inFile  = path.join(tmpDir, `p_${index}.puml`);
   const outFile = path.join(tmpDir, `p_${index}.png`);
   const codeWithFont = injectChineseFont(injectTheme(baseCode));
+
+  // 【关键】渲染前必须删掉可能存在的同名旧产物。
+  // 缓存目录是持久的，而 PlantUML 在"块内无 @startuml"等情况下的行为是
+  // **exit code 0 且不写任何文件**（stderr 仅提示 No diagram found）。
+  // 若不先删旧文件，下面靠 fs.existsSync(outFile) 判断成功就会把
+  // **上一份文档的 PNG** 当成本次结果，静默产出内容错误的文档。
+  fs.rmSync(outFile, { force: true });
   fs.writeFileSync(inFile, codeWithFont, 'utf8');
 
   // 3. 执行渲染
@@ -374,7 +381,8 @@ function renderPlantUML(code, tmpDir, index) {
   try {
     const res = run();
     if (res.stdout) renderStderr = res.stdout;
-    rendered = true;
+    // 不能只看退出码：PlantUML 失败时也可能返回 0，必须以产物为准
+    rendered = fs.existsSync(outFile);
   } catch (e) {
     // 渲染失败：依次尝试已知的自动修复（均基于原始代码，再注入字体）。
     // 只在失败后作为补救，成功才采用，因此不会影响本来正常的图。
@@ -386,12 +394,21 @@ function renderPlantUML(code, tmpDir, index) {
     for (const c of candidates) {
       if (!c.code) continue;
       const fixedWithFont = injectChineseFont(injectTheme(c.code));
+      fs.rmSync(outFile, { force: true });   // 同样先清旧产物
       fs.writeFileSync(inFile, fixedWithFont, 'utf8');
       try {
         run();
-        console.warn(`[plantuml] 图${index}: 自动修复（${c.label}）后渲染成功`);
-        rendered = true;
-        break;
+        // 仍以产物为准（PlantUML 可能 exit 0 却不写文件）
+        if (fs.existsSync(outFile)) {
+          console.warn(`[plantuml] 图${index}: 自动修复（${c.label}）后渲染成功`);
+          rendered = true;
+          break;
+        }
+        lastFailure = {
+          err: new Error(`自动修复（${c.label}）后仍未产出图像`),
+          code: c.code,
+          offset: fixedWithFont.split('\n').length - c.code.split('\n').length,
+        };
       } catch (e2) {
         lastFailure = {
           err: e2,

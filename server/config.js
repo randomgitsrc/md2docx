@@ -18,10 +18,14 @@ function bool(envVal, def) {
 const config = {
   // 服务监听
   port: num(process.env.PORT, 8080),
-  host: process.env.HOST || '0.0.0.0',
+  // 默认只绑本机：离线单机部署无需对外暴露，也不会触发 Windows 防火墙弹窗。
+  // 需要局域网访问时设 HOST=0.0.0.0 并放行防火墙。
+  host: process.env.HOST || '127.0.0.1',
 
   // 数据目录（作业工作目录）
-  dataDir: path.resolve(process.env.DATA_DIR || 'data'),
+  // 默认放在**安装目录**下而非 process.cwd()：从任意工作目录启动
+  // （快捷方式、计划任务、双击）都写到同一位置，避免产物散落各处。
+  dataDir: path.resolve(process.env.DATA_DIR || path.join(__dirname, '..', 'data')),
   get jobsDir() {
     return path.join(this.dataDir, 'jobs');
   },
