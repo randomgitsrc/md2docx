@@ -457,7 +457,95 @@ function stripBulletManualNumbers(content) {
 }
 
 // =========================================================================
-// 7. 题注标记: 将 md 中的 "表 X-X 名称" / "图 X-X 名称" 转为加粗
+// 7.5 兼容修复：缺少分隔行的「管道表格」
+// =========================================================================
+// 现象：块内每行都是 `| 键 | 值 |`，但**没有** Markdown 表格必需的
+//   「表头行 + 分隔行（|---|）」，于是 markdown-it 整块解析成一个普通段落，
+//   输出里所有内容被挤成一行文字，完全不再是表格。
+//
+// 成因：这类文档多为模板批量生成的（如 GJB 438C 的八字段需求用例表），
+//   生成器漏写了表头与分隔行。数据本身高度规整（实测某 1.4MB 文档 1280 个
+//   此类块全部为 2 列 × 8 行、列数无一例外），因此可安全补全。
+//
+// 兼容策略：在该块**前面补一个空表头行 + 分隔行**，而不是把首行当表头。
+//   因为这些块是「键值对」语义（需求名称/需求标识/…），若把首行提升为表头，
+//   `需求名称` 会被渲染成加粗居中的表头，值反而进了表头单元格——语义反了。
+//   补空表头后，md2docx 侧检测到「表头单元格全为空」即不输出表头行，
+//   结果是一张纯数据的 2 列表格，与作者本意一致。
+//
+// 保守边界（命中任一即**不**修复，避免误改）：
+//   - 代码围栏内（含图表渲染失败降级出的 ```text 块）
+//   - 已有分隔行（本就是合法表格，md 表格与它无关）
+//   - 不足 2 行 / 列数不一致 / 只有 1 列
+//   - 块内出现转义竖线 `\|`（切分不可靠）
+const LOOSE_TABLE_SEP_RE = /^\s*\|?[\s:|-]*-[\s:|-]*\|?\s*$/;
+
+function isTableSeparator(line) {
+  return LOOSE_TABLE_SEP_RE.test(line) && line.includes('-');
+}
+
+function splitPipeCells(line) {
+  return line.trim().replace(/^\|/, '').replace(/\|$/, '').split('|');
+}
+
+function repairLooseTables(content) {
+  const lines = content.split('\n');
+  const out = [];
+  let inFence = false;
+  let repaired = 0;
+  let i = 0;
+
+  while (i < lines.length) {
+    const line = lines[i];
+
+    if (/^\s*(```+|~~~+)/.test(line)) {
+      inFence = !inFence;
+      out.push(line);
+      i++;
+      continue;
+    }
+    if (inFence) {
+      out.push(line);
+      i++;
+      continue;
+    }
+
+    // 连续的「以 | 开头且以 | 结尾」行块
+    if (/^\s*\|.*\|\s*$/.test(line)) {
+      const block = [];
+      let j = i;
+      while (j < lines.length && /^\s*\|.*\|\s*$/.test(lines[j])) {
+        block.push(lines[j]);
+        j++;
+      }
+
+      const cells = block.map(splitPipeCells);
+      const colCount = cells[0] ? cells[0].length : 0;
+      const uniform = cells.every(c => c.length === colCount);
+      const alreadyTable = block.length >= 2 && isTableSeparator(block[1]);
+      const hasEscapedPipe = block.some(l => l.includes('\\|'));
+
+      if (!alreadyTable && !hasEscapedPipe && block.length >= 2 && uniform && colCount >= 2) {
+        const emptyHeader = `|${Array.from({ length: colCount }, () => '  ').join('|')}|`;
+        const separator = `|${Array.from({ length: colCount }, () => '---').join('|')}|`;
+        out.push(emptyHeader, separator, ...block);
+        repaired++;
+      } else {
+        out.push(...block);
+      }
+      i = j;
+      continue;
+    }
+
+    out.push(line);
+    i++;
+  }
+
+  return { content: out.join('\n'), repaired };
+}
+
+// =========================================================================
+// 8. 题注标记: 将 md 中的 "表 X-X 名称" / "图 X-X 名称" 转为加粗
 // =========================================================================
 // md 中已有题注行如:
 //   表 1-1 标识
@@ -639,6 +727,15 @@ function preprocess(inputPath, opts = {}) {
   raw = stripBulletManualNumbers(raw);
   report.log('[preprocess] 5. 列表手动编号已剥离');
   if (opts.onProgress) opts.onProgress(85, '剥离列表编号');
+
+  // 兼容修复：补全缺分隔行的管道表格（必须在 markCaptions 之前——
+  // 表题注的判定依赖「向下首个内容是表格行」，修好表格才能正确定位题注）
+  const loose = repairLooseTables(raw);
+  raw = loose.content;
+  if (loose.repaired > 0) {
+    report.log(`[preprocess] 5.5 补全缺分隔行的表格: ${loose.repaired} 个`);
+    if (opts.onLog) opts.onLog(`[preprocess] 补全缺分隔行的表格: ${loose.repaired} 个`);
+  }
 
   raw = markCaptions(raw);
   report.log('[preprocess] 6. 题注已标记为加粗');

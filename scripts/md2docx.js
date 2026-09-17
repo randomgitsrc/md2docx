@@ -1071,6 +1071,13 @@ class Md2DocxConverter {
       height: { value: minRowHeight, rule: 'atLeast' },
       children: headers.map((h, idx) => buildCell(h, true, idx)),
     });
+    // 空表头（所有表头单元格均无文字）不渲染表头行。
+    // 场景：preprocess 的 repairLooseTables 为「键值对」型无分隔行表格补了
+    // 空表头 + 分隔行，使 markdown-it 能解析成表格；但那种表的首行是数据
+    // （需求名称/需求标识…）而非列名，若照常输出会出现一条表头行——
+    // 首行被当成列名加粗居中，语义错误。故此处整行略去。
+    const isEmptyHeader = headers.length > 0 && headerInlineTokens
+      .every(tok => !this.flattenInlineToText(tok).trim());
     const dataRows = rows.map(row => new TableRow({
       cantSplit: true,
       height: { value: minRowHeight, rule: 'atLeast' },
@@ -1089,7 +1096,7 @@ class Md2DocxConverter {
         insideHorizontal: { style: BorderStyle.SINGLE, size: 6, color: '000000' },
         insideVertical:   { style: BorderStyle.SINGLE, size: 6, color: '000000' },
       },
-      rows: [headerRow, ...dataRows],
+      rows: [...(isEmptyHeader ? [] : [headerRow]), ...dataRows],
     });
     this.currentSection.children.push(table);
     // 表格后追加空行,避免连续表格直接粘连

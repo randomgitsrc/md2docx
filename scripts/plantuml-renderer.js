@@ -130,6 +130,54 @@ function fixMultiElse(code) {
   return fixed ? lines.join('\n') : null;
 }
 
+// 活动图关键字/指令行：原样保留，绝不包裹成 :...;
+const ACTIVITY_KEYWORD_RE = /^(?:@\w+|!|'|start|stop|end|if|else|elseif|endif|while|endwhile|repeat|backward|fork|split|kill|detach|partition|note|endnote|legend|header|footer|title|caption|skinparam|skin|hide|show|scale|left|right|top|bottom|style|together|swimlane|group|alt|opt|loop|par|break|critical)(?:\s|\(|$)/i;
+// 块内出现这些关键字才认定是活动图
+const ACTIVITY_HINT_RE = /^\s*(?:start|stop|if\s*\(|while\s*\(|repeat)\b/m;
+
+/**
+ * 修复「旧式活动图」写法：活动名裸写一行（没有 :...; 包裹）。
+ *
+ * 新版 PlantUML（1.2025+，core 与 jar 后端均已实测）对下面这种写法直接报
+ * `Syntax Error? (Assumed diagram type: activity)`：
+ *
+ *   @startuml
+ *   start
+ *   接收外部输入或操作指令     ← 裸写，非法
+ *   stop
+ *   @enduml
+ *
+ * 官方新语法要求 `:接收外部输入或操作指令;`；官方 legacy 语法也不支持裸写
+ * （legacy 用 `(*)` + 带引号的名称）。因此这是**源文件写法过时**，
+ * 但批量文档里很常见，这里按兼容处理。
+ *
+ * 安全性：与 fixMultiElse / fixUnquotedNames 一样，**只在渲染失败后**作为补救尝试，
+ * 成功才采用，因此不可能影响本来就能正常渲染的图。另外仅当块内确有活动图关键字
+ * （start / stop / if( / while( / repeat）时才介入，避免误伤用例图、类图里
+ * 合法的裸标识符行。
+ */
+function fixBareActivityNames(code) {
+  if (!ACTIVITY_HINT_RE.test(code)) return null;  // 不是活动图，不介入
+
+  let changed = false;
+  const lines = code.split('\n').map(line => {
+    const t = line.trim();
+    if (!t) return line;
+    if (t.startsWith(':')) return line;              // 已是新语法
+    if (t.startsWith('|')) return line;              // 泳道定义
+    if (ACTIVITY_KEYWORD_RE.test(t)) return line;    // 关键字/指令行
+    if (/->|\.\.>|==/.test(t)) return line;          // 箭头/连接线
+    // 含 ASCII 特殊字符时不冒险（可能破坏语义）
+    if (/[:;"'{}\[\]<>=@#$%^&*~`\\]/.test(t)) return line;
+    // 必须以中文、字母或数字开头，排除剩余符号行
+    if (!/^[\u4e00-\u9fa5A-Za-z0-9]/.test(t)) return line;
+    changed = true;
+    return `:${t};`;
+  });
+
+  return changed ? lines.join('\n') : null;
+}
+
 // 自动补全缺失的结束标记。
 // 常见手写遗漏：写了 @startuml 但漏掉 @enduml。PlantUML 对这类不完整块
 // 只在 stderr 提示 "No diagram found"、退出码仍为 0、且不产出任何文件，
@@ -422,6 +470,7 @@ function renderPlantUML(code, tmpDir, index) {
     const candidates = [
       { label: '多 else 语法', code: fixMultiElse(baseCode) },
       { label: '名称加引号',   code: fixUnquotedNames(baseCode) },
+      { label: '旧式活动图裸写活动名', code: fixBareActivityNames(baseCode) },
     ];
     let lastFailure = null;
     for (const c of candidates) {
