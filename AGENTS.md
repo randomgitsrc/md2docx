@@ -15,9 +15,14 @@ node scripts/preprocess.js md/xxx.md                   # 阶段1：预处理 →
 node scripts/md2docx.js md/output/clean/xxx.clean.md   # 阶段2：转 DOCX → md/output/docx/xxx.docx
 node scripts/build_template.js                         # 参考模板生成器（硬编码路径，不进流水线）
 
+node scripts/cli.js md/xxx.md                          # 跨平台 CLI（纯 Node；Windows 用这个，md2docx.sh 是 bash）
+
 # HTTP 服务（详见 docs/http-service.md 与 docs/api.md）
 node server/app.js                                     # 启动服务（默认 http://127.0.0.1:8080）
 PORT=8080 MAX_CONCURRENT=2 node server/app.js           # 可选环境变量（见 server/config.js）
+
+# Windows 完全离线包（在有网机器上跑一次；详见 docs/deployment/windows-offline.md）
+node scripts/build-windows-bundle.js                   # → dist/md2docx-win-x64{,.zip}
 ```
 
 产物目录（均已被 .gitignore 忽略，勿提交）：
@@ -136,3 +141,7 @@ md2docx 转换时，mermaid 与 PlantUML 图表**默认注入灰阶/黑白主题
    - 缺依赖时图表降级为代码块，不报致命错误。`/api/health` 的 `status` 只看必需项。
 5. mmdc 统一走 `exec-util.runMmdc()`（`node <mermaid-cli>/src/cli.js` + 参数数组，不经 shell，也不走 `npx`）——不要改回 `npx mmdc` 或模板字符串拼命令，原因见「已知陷阱」第 11 条。
 6. HTTP 服务：`node server/app.js` 起服务；`curl /api/health` 应返回全部依赖 ✓。前端 E2E 需本机 Chrome CDP：`NODE_PATH=$(npm root -g) node scripts/e2e-web.js`；无 CDP 环境时用 curl 走 API 全流程代替（见 `docs/api.md`）。
+7. 离线包：构建后**必须做依赖完整性冒烟**——用包内 `node_modules` 跑一次
+   `scripts/cli.js`（Linux 上可临时用 `PUPPETEER_EXECUTABLE_PATH` 指向本机浏览器），
+   确认 mermaid/PlantUML 均渲染、docx 产出正常，避免"只能构建不能运行"。
+   Windows 真机待确认项（图内中文是否变方块等）见 `docs/plans/windows-native.md` §7。

@@ -149,14 +149,15 @@
 2. ☑ 字体平台分支、Chrome/Edge 探测、去 curl 依赖
 3. ☑ 去 python-docx（改原生属性，等价性已验证）
 4. ☑ P0 修复：陈旧产物、BOM；host/dataDir/端口默认值
-5. ☐ **接入 `@plantuml/core`**：新增 core 后端 + `PLANTUML_BACKEND=core|jar` 开关，
-   用现有 puppeteer 加载 `plantuml.js`+`viz-global.js` 渲染 SVG → 截图 PNG；
-   保留 jar 后端作回退
-6. ☐ `node_modules` 裁剪脚本 + win32 定向安装（`npm ci --os=win32 --cpu=x64`）
-7. ☐ Windows CLI 入口（纯 Node，跨平台一套逻辑）
-8. ☐ 组装离线包（便携 node + node_modules + Chromium）+ 启动脚本 + 免安装 zip
-9. ☐ **Windows 真机实测**（见 §7）
-10. ☐ 文档：`docs/deployment/windows.md`（安装、端口、防火墙、卸载、离线）
+5. ☑ **接入 `@plantuml/core`**：core 后端已实现 + `PLANTUML_BACKEND=core|jar|auto` 开关，
+   经 `plantuml-core-helper.js`（子进程 + 无头 Chromium）渲染 SVG → 截图 PNG；jar 保留为回退。
+   实测用户文档 23/23 成功、总耗时 29s（jar 版 3-5 分钟）
+6. ☑ `node_modules` 裁剪 + win32 定向安装（`npm ci --os=win32 --cpu=x64`）
+7. ☑ Windows CLI 入口 `scripts/cli.js`（纯 Node，跨平台一套逻辑）
+8. ☑ 离线包组装 `scripts/build-windows-bundle.js` → 534.8MB 目录 / 213.3MB zip，
+   含启动脚本与使用说明
+9. ☐ **Windows 真机实测**（见 §7）——唯一剩余的关键步骤
+10. ☑ 文档：`docs/deployment/windows-offline.md`（构建、分发、使用、卸载、验证清单）
 
 ## 7. 验证清单（Windows 真机）
 
