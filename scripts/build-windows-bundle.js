@@ -38,6 +38,7 @@ const BUNDLE_NAME = 'md2docx-win-x64';
 const BUNDLE_DIR = path.join(OUT_DIR, BUNDLE_NAME);
 const SKIP_CHROMIUM = opt('--skip-chromium');
 const MAKE_INSTALLER = opt('--installer');   // 额外产出 Windows 一键安装器（EXE）
+const ALLOW_DIRTY = opt('--allow-dirty');  // 允许在脏工作区构建（不推荐用于分发）
 const TEMP = path.join(os.tmpdir(), `md2docx-bundle-${Date.now()}`);
 const KEEP_TEMP = opt('--keep-temp');
 
@@ -114,6 +115,7 @@ function buildStamp() {
 
 async function main() {
   log(`输出目录: ${OUT_DIR}`);
+  assertCleanTree();
   fs.mkdirSync(TEMP, { recursive: true });
 
   // ---------------------------------------------------------------- 1. 便携 Node
@@ -322,6 +324,10 @@ async function main() {
     '注：本目录代码是构建时的快照；改了源码需重新运行 build-windows-bundle.js。',
   ].join('\r\n') + '\r\n', 'utf8');
 
+  // ---- 打包前闸门：先证明这个包是对的，再打包 ----
+  verifyBundleCode(BUNDLE_DIR);
+  smokeTestBundle(BUNDLE_DIR);
+
   // ---------------------------------------------------------------- 6. 打包 zip
   log('步骤 6/6：打包 zip');
   const AdmZip = require(path.join(ROOT, 'node_modules', 'adm-zip'));
@@ -355,6 +361,133 @@ async function main() {
   log(`  代码版本: ${stamp.git} @ ${stamp.time}`);
   log(`  目标机：解压 → 双击「启动 md2docx.cmd」→ 浏览器自动打开`);
 
+
+/**
+ * 构建前：确认代码状态可追溯。
+ * 分发包必须能对应到确定版本——曾出现"包内是旧提交的代码"导致
+ * 排查方向被误导（见 BUILD-INFO.txt 的引入原因），故默认拒绝脏工作区。
+ */
+function assertCleanTree() {
+  let status = '';
+  try {
+    status = execFileSync('git', ['status', '--porcelain'], { cwd: ROOT, encoding: 'utf8' }).trim();
+  } catch (_) {
+    log('  ⚠ 非 git 环境，跳过代码可追溯性检查');
+    return;
+  }
+  if (!status) { log('  代码状态：干净'); return; }
+  if (!ALLOW_DIRTY) {
+    fail('工作区有未提交改动，构建出的包无法对应确定版本。\n'
+      + '  请先提交，或加 --allow-dirty 强制构建（不推荐用于分发）。\n'
+      + '  改动文件：\n'
+      + status.split('\n').slice(0, 10).map((l) => '    ' + l).join('\n'));
+  }
+  log('  ⚠ 工作区有未提交改动（--allow-dirty），包内容不可追溯');
+}
+
+/**
+ * 构建后：校验包内应用代码与当前源码**逐字节一致**。
+ * 防的是"拷贝遗漏 / 旧文件残留"——包内代码不等于源码，是最难察觉的一类坏包。
+ */
+function verifyBundleCode(bundleDir) {
+  log('附加步骤：校验包内代码与当前源码一致');
+  const mismatch = [];
+  let checked = 0;
+  const walk = (rel) => {
+    const src = path.join(ROOT, rel);
+    const dst = path.join(bundleDir, rel);
+    if (!fs.existsSync(src)) return;
+    if (fs.statSync(src).isDirectory()) {
+      for (const e of fs.readdirSync(src)) walk(path.join(rel, e));
+      return;
+    }
+    checked++;
+    if (!fs.existsSync(dst)) { mismatch.push(`${rel}（包内缺失）`); return; }
+    if (!fs.readFileSync(src).equals(fs.readFileSync(dst))) mismatch.push(`${rel}（内容不一致）`);
+  };
+  for (const item of ['scripts', 'server']) walk(item);
+  if (mismatch.length > 0) {
+    fail(`包内代码与源码不一致（${mismatch.length} 处）：\n`
+      + mismatch.slice(0, 10).map((m) => '    ' + m).join('\n'));
+  }
+  log(`  一致（比对 ${checked} 个文件）`);
+}
+
+/**
+ * 构建后：用**包内**代码与依赖跑一次真实转换。
+ * 这是最关键的一道闸门——"能构建"不等于"能运行"（缺依赖、平台包不全、
+ * 裁剪误删等只有真跑一次才暴露）。
+ *
+ * 自检用例刻意覆盖近期修过的缺陷路径：
+ *   002 作者本地图片可解析 / 003 裸写活动名的活动图 / 004 无分隔行的键值表
+ */
+function smokeTestBundle(bundleDir) {
+  log('附加步骤：包自检（用包内代码 + 包内依赖跑真实转换）');
+
+  let chrome = null;
+  try { chrome = require(path.join(ROOT, 'scripts', 'puppeteer-config')).findChrome(); } catch (_) { /* 无 */ }
+  if (!chrome) {
+    log('  ⚠ 本机无可用浏览器 → 跳过渲染类自检');
+    log('    Windows 真机务必验证（清单见 docs/deployment/windows-offline.md §7）');
+    return;
+  }
+
+  const work = path.join(TEMP, 'smoke');
+  fs.rmSync(work, { recursive: true, force: true });
+  fs.mkdirSync(path.join(work, 'assets'), { recursive: true });
+
+  // 本地图片（覆盖缺陷 002：作者自带图片必须能解析）
+  const imgSrc = path.join(ROOT, 'md', 'qa', 'local-image', 'assets', 'diagram.png');
+  if (fs.existsSync(imgSrc)) fs.copyFileSync(imgSrc, path.join(work, 'assets', 'diagram.png'));
+
+  const md = path.join(work, 'smoke.md');
+  fs.writeFileSync(md, [
+    '---', 'title: 离线包自检', 'company: 自检', 'date: 2026年9月', '---', '',
+    '# 离线包自检', '',
+    '## 流程图（mermaid）', '', '```mermaid', 'graph TD', '    A[开始] --> B[结束]', '```', '',
+    '## 活动图（裸写活动名，缺陷 003）', '', '```plantuml', '@startuml', 'start',
+    '接收外部输入或操作指令', 'stop', '@enduml', '```', '',
+    '## 键值表（无分隔行，缺陷 004）', '',
+    '| 需求名称 | 加载本地基础影像数据 |',
+    '| 需求标识 | GMS-JD-ZCCX-010 |', '',
+    '## 作者本地图片（缺陷 002）', '',
+    '![架构图](assets/diagram.png)', '',
+  ].join('\n'), 'utf8');
+
+  try {
+    execFileSync(process.execPath, [path.join(bundleDir, 'scripts', 'cli.js'), md], {
+      cwd: bundleDir,
+      stdio: 'pipe',
+      timeout: 600000,
+      env: {
+        ...process.env,
+        PLANTUML_BACKEND: 'core',
+        PUPPETEER_EXECUTABLE_PATH: chrome,
+        DATA_DIR: path.join(work, 'data'),
+      },
+    });
+  } catch (e) {
+    const tail = ((e.stdout || '') + (e.stderr || '')).toString().trim()
+      .split('\n').slice(-6).join('\n    ');
+    fail(`包自检失败：包内代码无法完成转换\n    ${tail}`);
+  }
+
+  const docx = path.join(work, 'output', 'docx', 'smoke.docx');
+  if (!fs.existsSync(docx)) fail('包自检失败：未产出 DOCX');
+  const AdmZip = require(path.join(ROOT, 'node_modules', 'adm-zip'));
+  const xml = new AdmZip(docx).readAsText('word/document.xml');
+  const drawings = (xml.match(/<w:drawing>/g) || []).length;
+  const tables = (xml.match(/<w:tbl>/g) || []).length;
+
+  const problems = [];
+  if (drawings < 3) problems.push(`图片数 ${drawings}，期望 ≥3（mermaid + 活动图 + 作者本地图）`);
+  if (tables < 1) problems.push(`表格数 ${tables}，期望 ≥1（无分隔行表格应被修复成真表格）`);
+  if (xml.includes('图片缺失')) problems.push('出现「图片缺失」占位');
+  if (problems.length > 0) {
+    fail('包自检断言未通过：\n' + problems.map((x) => '    ' + x).join('\n'));
+  }
+  log(`  通过：图 ${drawings} 张（含裸活动名）、表 ${tables} 个（无分隔行已修复）、无图片缺失`);
+}
 
 /** 让 makensis 可用：优先 PATH，否则本地解包 Linux 版 NSIS（不改系统、不需 root） */
 async function ensureMakensis() {
