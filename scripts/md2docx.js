@@ -19,6 +19,7 @@ const path = require('path');
 const { execSync } = require('child_process');
 const os = require('os');
 const { runMmdc } = require('./exec-util');
+const { repairUnescapedImagePaths } = require('./md-repair');
 
 // markdown-it 与 gray-matter 装在全局,通过 NODE_PATH 引入
 const matter = require('gray-matter');
@@ -1431,6 +1432,16 @@ async function convert(cleanPath, opts = {}) {
   const parsed = matter(raw);
   const meta = parsed.data || {};
   let content = parsed.content;
+
+  // 兼容修复：图片路径含裸空格时补 <>（与 preprocess 共用同一实现）。
+  // 双路一致：preprocess → md2docx 是推荐入口，但用户也可能直接把 md
+  // 交给本文件；两处都修才能保证同一份 md 在两条路径下结果相同。
+  const spaceFix = repairUnescapedImagePaths(content);
+  content = spaceFix.content;
+  if (spaceFix.repaired > 0) {
+    report.log(`[md2docx] 修复含空格的图片引用: ${spaceFix.repaired} 处`);
+    if (opts.onLog) opts.onLog(`[md2docx] 修复含空格的图片引用: ${spaceFix.repaired} 处`);
+  }
 
   // 剥离 H1(# 文档标题)作为封面标题
   // 规则:整个 md 文件中,# 一级标题只能用于"文档标题",章节起始用 ##

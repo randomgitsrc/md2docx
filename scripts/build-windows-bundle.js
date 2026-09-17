@@ -115,7 +115,11 @@ function buildStamp() {
 
 async function main() {
   log(`输出目录: ${OUT_DIR}`);
-  assertCleanTree();
+  // 先固定构建戳、再校验工作区：两者必须来自同一时点。
+  // 此前 buildStamp() 在组装后才调用，若期间工作区变脏（或构建中改了文件），
+  // 戳会显示 -dirty 却已通过开头的干净检查，二者自相矛盾。
+  const stamp = buildStamp();
+  assertCleanTree(stamp);
   fs.mkdirSync(TEMP, { recursive: true });
 
   // ---------------------------------------------------------------- 1. 便携 Node
@@ -312,8 +316,7 @@ async function main() {
     `构建信息：Node ${nodeVer}${chromeDir ? ' / 内置 chrome-headless-shell' : ' / 使用系统 Chrome 或 Edge'}`,
   ].join('\r\n') + '\r\n', 'utf8');
 
-  // 构建戳（便于确认目标机上的包是哪次构建的）
-  const stamp = buildStamp();
+  // 构建戳已在 main 开头固定（与干净检查同一时点）
   fs.writeFileSync(path.join(BUNDLE_DIR, 'BUILD-INFO.txt'), [
     `构建时间: ${stamp.time}`,
     `代码版本: ${stamp.git}`,
@@ -367,7 +370,7 @@ async function main() {
  * 分发包必须能对应到确定版本——曾出现"包内是旧提交的代码"导致
  * 排查方向被误导（见 BUILD-INFO.txt 的引入原因），故默认拒绝脏工作区。
  */
-function assertCleanTree() {
+function assertCleanTree(stamp) {
   let status = '';
   try {
     status = execFileSync('git', ['status', '--porcelain'], { cwd: ROOT, encoding: 'utf8' }).trim();
@@ -375,7 +378,7 @@ function assertCleanTree() {
     log('  ⚠ 非 git 环境，跳过代码可追溯性检查');
     return;
   }
-  if (!status) { log('  代码状态：干净'); return; }
+  if (!status) { log(`  代码状态：干净（${stamp ? stamp.git : 'unknown'}）`); return; }
   if (!ALLOW_DIRTY) {
     fail('工作区有未提交改动，构建出的包无法对应确定版本。\n'
       + '  请先提交，或加 --allow-dirty 强制构建（不推荐用于分发）。\n'

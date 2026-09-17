@@ -26,6 +26,7 @@ const yaml = require('js-yaml');
 const { generateConfig } = require('./puppeteer-config');
 const { renderPlantUML } = require('./plantuml-renderer');
 const { runMmdc } = require('./exec-util');
+const { repairUnescapedImagePaths } = require('./md-repair');
 
 // =========================================================================
 // 0. 共享常量
@@ -712,6 +713,17 @@ function preprocess(inputPath, opts = {}) {
   if (opts.onProgress) opts.onProgress(20, '剥离标题编号');
 
   raw = checkDeepHeadings(raw);
+
+  // 兼容修复：图片路径含裸空格时补 <>（必须在渲染之前——
+  // 渲染阶段会写入自己的 PNG 引用，不应被本步扫描）。
+  // CommonMark 规定目标里裸空格必须用 <> 或 %20，否则整段不被解析为图片，
+  // 会以纯文本形式印进成品文档（Windows 文件名常含空格，见下方函数注释）。
+  const spaceFix = repairUnescapedImagePaths(raw);
+  raw = spaceFix.content;
+  if (spaceFix.repaired > 0) {
+    report.log(`[preprocess] 2.5 修复含空格的图片引用: ${spaceFix.repaired} 处`);
+    if (opts.onLog) opts.onLog(`[preprocess] 修复含空格的图片引用: ${spaceFix.repaired} 处`);
+  }
 
   const hooks = { report, onProgress: opts.onProgress, onLog: opts.onLog, origFenceLines };
   const dirs = { mermaidDir: mermaidCacheDir, pumlDir: plantumlCacheDir, cleanDir };

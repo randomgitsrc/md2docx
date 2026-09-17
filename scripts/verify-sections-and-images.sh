@@ -15,7 +15,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 NODE_MODULES="$ROOT/node_modules"
 FAIL=0
 
-echo "=== 步骤 1/3：作者自带本地图片不丢失（缺陷 002）==="
+echo "=== 步骤 1/4：作者自带本地图片不丢失（缺陷 002）==="
 "$ROOT/scripts/md2docx.sh" "$ROOT/md/qa/local-image/index.md" >/dev/null 2>&1 \
   || { echo "FAIL: 转换失败"; exit 1; }
 IMG_DOCX="$ROOT/md/qa/local-image/output/docx/index.docx"
@@ -31,7 +31,7 @@ if (x.includes("图片缺失")) { console.error("FAIL: 出现图片缺失占位"
 console.log(`    嵌入图片 ${n} 张（2 张作者自带 + 1 张渲染），无缺失`);
 ' "$IMG_DOCX" || FAIL=1
 
-echo "=== 步骤 2/3：连续横置图之间无空节（缺陷 001）==="
+echo "=== 步骤 2/4：连续横置图之间无空节（缺陷 001）==="
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
@@ -94,7 +94,29 @@ if (land < 3) { console.error(`FAIL: 横置节仅 ${land} 个，期望 >=3（3 �
 console.log(`    共 ${valid.length} 节（横置 ${land} 节，图 ${imgs} 张），零内容空节 0 个`);
 ' "$TMP/output/docx/sec.docx" || FAIL=1
 
-echo "=== 步骤 3/3：既有 QA 用例未回归 ==="
+echo "=== 步骤 3/4：含空格的图片路径不得漏成源码（Windows 常见）==="
+SPACE_DIR="$ROOT/md/qa/spaceimg"
+"$ROOT/scripts/md2docx.sh" "$SPACE_DIR/index.md" >/dev/null 2>&1 \
+  || { echo "FAIL: 含空格图片用例转换失败"; FAIL=1; }
+SPACE_DOCX="$SPACE_DIR/output/docx/index.docx"
+if [ ! -f "$SPACE_DOCX" ]; then
+  echo "FAIL: 未生成 $SPACE_DOCX"; FAIL=1
+else
+  NODE_PATH="$NODE_MODULES" node -e '
+  const AdmZip = require("adm-zip");
+  const x = new AdmZip(process.argv[1]).readAsText("word/document.xml");
+  const n = (x.match(/<w:drawing>/g) || []).length;
+  const texts = [...x.matchAll(/<w:t[^>]*>([^<]*)<\/w:t>/g)].map(m => m[1]);
+  const leftover = texts.filter(t => t.includes("!["));
+  // 用例含 4 个引用（普通名 / 裸空格 / 尖括号 / %20 转义），全部应成为真图片
+  if (n !== 4) { console.error(`FAIL: 图片数 ${n}，期望 4`); process.exit(1); }
+  // 关键断言：裸空格那种若未被修复，会以纯文本印进文档
+  if (leftover.length > 0) { console.error(`FAIL: 残留 Markdown 源码 ${JSON.stringify(leftover)}`); process.exit(1); }
+  console.log(`    含空格路径 4 种写法全部嵌入为图片，无残留源码`);
+  ' "$SPACE_DOCX" || FAIL=1
+fi
+
+echo "=== 步骤 4/4：既有 QA 用例未回归 ==="
 for f in wide-table caption-forms crlf-test bom-duplicate-key plantuml-no-end; do
   if "$ROOT/scripts/md2docx.sh" "$ROOT/md/qa/$f.md" >/dev/null 2>&1; then
     printf "    %-20s OK\n" "$f"
