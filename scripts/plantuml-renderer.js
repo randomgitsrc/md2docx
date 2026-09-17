@@ -5,6 +5,7 @@
 const fs = require('fs');
 const path = require('path');
 const { execSync } = require('child_process');
+const { downloadFileSync, runFile } = require('./exec-util');
 
 // A4 内容区宽度(px)，与 md2docx.js 保持一致
 const CONTENT_WIDTH_PX = Math.round((21 - 2.7 - 2.7) * 96 / 2.54);
@@ -38,13 +39,23 @@ function checkGraphviz() {
 // =========================================================================
 
 function findPlantUML() {
-  // 1. 系统 PATH 中有 plantuml 命令（apt 安装或用户手动安装）
-  try {
-    execSync('plantuml -version', { stdio: 'pipe' });
-    return { type: 'command', cmd: 'plantuml' };
-  } catch {}
+  // 1. 系统 PATH 中有 plantuml 命令（apt 安装 / Windows 原生 exe）
+  //    Windows 的 CreateProcess 会自动补 .exe，故无需显式后缀
+  if (runFile('plantuml', ['-version'], { allowFailure: true }).ok) {
+    return { type: 'command' };
+  }
 
-  // 2. 项目 bin/ 目录下有 plantuml.jar
+  // 2. 项目 bin/ 下的原生可执行文件（Windows 打包用，免 Java）
+  //    对应官方 native-plantuml-windows-amd64-<ver>.zip 解压出的可执行文件
+  const nativeNames = process.platform === 'win32'
+    ? ['plantuml.exe', 'native-plantuml.exe']
+    : ['plantuml', 'native-plantuml'];
+  for (const n of nativeNames) {
+    const p = path.resolve(__dirname, '../bin', n);
+    if (fs.existsSync(p)) return { type: 'command', exe: p };
+  }
+
+  // 3. 项目 bin/ 目录下有 plantuml.jar（需 Java）
   const jarPath = path.resolve(__dirname, '../bin/plantuml.jar');
   if (fs.existsSync(jarPath)) {
     return { type: 'jar', jar: jarPath };
@@ -62,11 +73,11 @@ function downloadPlantUML() {
   const jarPath = path.join(binDir, 'plantuml.jar');
   fs.mkdirSync(binDir, { recursive: true });
 
-  // Use v1.2023.0 which supports Java 8 (class file version 52)
-  // Latest versions require Java 11+ (class file version 55+)
-  const url = 'https://github.com/plantuml/plantuml/releases/download/v1.2023.0/plantuml.jar';
-  console.log('[plantuml] 首次使用，正在下载 plantuml.jar (v1.2023.0, 兼容 Java 8)...');
-  execSync(`curl -L -o "${jarPath}" "${url}"`, { stdio: 'inherit' });
+  // 版本与 scripts/md2docx.sh、bin/plantuml.jar 保持一致
+  const url = 'https://github.com/plantuml/plantuml/releases/download/v1.2025.2/plantuml.jar';
+  console.log('[plantuml] 首次使用，正在下载 plantuml.jar (v1.2025.2)...');
+  // 用 Node 内置 https 下载，不依赖系统 curl（Windows 无 curl）
+  downloadFileSync(url, jarPath);
   console.log('[plantuml] 下载完成');
   return { type: 'jar', jar: jarPath };
 }
@@ -181,9 +192,39 @@ function fixUnquotedNames(code) {
 }
 
 // 检测系统可用中文字体，返回 PlantUML 可用的字体名
+// Windows 没有 fc-list，必须走平台分支；否则注入不到中文字体，
+// PlantUML 渲染出的图里中文会变成方块。
 let cachedChineseFont = null;
 function findChineseFont() {
   if (cachedChineseFont !== null) return cachedChineseFont;
+
+  const WINDIR = process.env.WINDIR || 'C:\\Windows';
+  const winFonts = [
+    // [字体名, 字体文件]  按优先级排列
+    ['Microsoft YaHei', 'msyh.ttc'],
+    ['Microsoft YaHei', 'msyh.ttf'],
+    ['SimSun', 'simsun.ttc'],
+    ['DengXian', 'Deng.ttf'],
+    ['SimHei', 'simhei.ttf'],
+    ['KaiTi', 'simkai.ttf'],
+  ];
+  const tryWindowsFonts = () => {
+    for (const [name, file] of winFonts) {
+      if (fs.existsSync(path.join(WINDIR, 'Fonts', file))) {
+        cachedChineseFont = name;
+        return true;
+      }
+    }
+    return false;
+  };
+
+  if (process.platform === 'win32') {
+    if (tryWindowsFonts()) return cachedChineseFont;
+    cachedChineseFont = '';
+    return cachedChineseFont;
+  }
+
+  // Linux / macOS：用 fc-list
   try {
     const output = execSync('fc-list :lang=zh', { stdio: 'pipe', encoding: 'utf8' });
     const fonts = output.split('\n');
@@ -198,6 +239,8 @@ function findChineseFont() {
     cachedChineseFont = '';
     return cachedChineseFont;
   } catch {
+    // 没有 fc-list（或执行失败）时，兜底尝试 Windows 字体目录
+    if (tryWindowsFonts()) return cachedChineseFont;
     cachedChineseFont = '';
     return cachedChineseFont;
   }
@@ -231,17 +274,32 @@ function injectChineseFont(code) {
 // 4. 组装渲染命令
 // =========================================================================
 
+/**
+ * 组装 PlantUML 渲染命令，返回 { cmd, args }。
+ * 用参数数组而非命令字符串：Windows 路径含空格/中文时字符串拼命令会被拆坏，
+ * 且 Windows 下 java/plantuml 需要 .exe 后缀。
+ */
 function buildCommand(puml, inFile, outDir) {
-  // 优先使用 Java 11+ 运行 PlantUML，回退到系统默认 java
-  let javaCmd = 'java';
-  for (const j of ['/usr/lib/jvm/java-21-openjdk-amd64/bin/java', '/usr/lib/jvm/java-17-openjdk-amd64/bin/java', '/usr/lib/jvm/java-11-openjdk-amd64/bin/java']) {
+  const args = ['-tpng', '-o', outDir, inFile];
+
+  if (puml.type === 'command') {
+    // 系统 PATH 中的 plantuml（apt / 手动安装 / Windows 原生 exe）
+    const exe = process.platform === 'win32' ? 'plantuml.exe' : 'plantuml';
+    return { cmd: puml.exe || exe, args };
+  }
+
+  // jar 方式：优先用已知的 Java 11+ 路径，回退系统 java
+  let javaCmd = process.platform === 'win32' ? 'java.exe' : 'java';
+  const javaHomes = [
+    process.env.JAVA_HOME && path.join(process.env.JAVA_HOME, 'bin', 'java'),
+    '/usr/lib/jvm/java-21-openjdk-amd64/bin/java',
+    '/usr/lib/jvm/java-17-openjdk-amd64/bin/java',
+    '/usr/lib/jvm/java-11-openjdk-amd64/bin/java',
+  ].filter(Boolean);
+  for (const j of javaHomes) {
     if (fs.existsSync(j)) { javaCmd = j; break; }
   }
-  if (puml.type === 'command') {
-    return `plantuml -tpng -o "${outDir}" "${inFile}"`;
-  }
-  // jar 方式：优先使用 Java 11+
-  return `${javaCmd} -jar "${puml.jar}" -tpng -o "${outDir}" "${inFile}"`;
+  return { cmd: javaCmd, args: ['-jar', puml.jar, ...args] };
 }
 
 // =========================================================================
@@ -309,12 +367,13 @@ function renderPlantUML(code, tmpDir, index) {
   fs.writeFileSync(inFile, codeWithFont, 'utf8');
 
   // 3. 执行渲染
-  const cmd = buildCommand(puml, inFile, tmpDir);
+  const { cmd, args } = buildCommand(puml, inFile, tmpDir);
+  const run = () => runFile(cmd, args, { timeout: 30000 });
   let renderStderr = '';
   let rendered = false;
   try {
-    const res = execSync(cmd, { stdio: 'pipe', timeout: 30000 });
-    if (res && res.stderr) renderStderr = res.stderr.toString();
+    const res = run();
+    if (res.stdout) renderStderr = res.stdout;
     rendered = true;
   } catch (e) {
     // 渲染失败：依次尝试已知的自动修复（均基于原始代码，再注入字体）。
@@ -329,7 +388,7 @@ function renderPlantUML(code, tmpDir, index) {
       const fixedWithFont = injectChineseFont(injectTheme(c.code));
       fs.writeFileSync(inFile, fixedWithFont, 'utf8');
       try {
-        execSync(cmd, { stdio: 'pipe', timeout: 30000 });
+        run();
         console.warn(`[plantuml] 图${index}: 自动修复（${c.label}）后渲染成功`);
         rendered = true;
         break;

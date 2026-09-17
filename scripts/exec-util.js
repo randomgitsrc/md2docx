@@ -111,4 +111,44 @@ function downloadFile(url, dest, opts = {}) {
   });
 }
 
-module.exports = { runFile, resolveMmdcCli, runMmdc, downloadFile };
+/**
+ * 同步下载文件（跨平台，不依赖系统 curl）。
+ * 实现方式：用当前 node 起一个子进程执行内联下载脚本并阻塞等待。
+ * Windows 无 curl，Linux 的 curl 也未必安装，故不依赖外部工具。
+ * @param {string} url
+ * @param {string} dest
+ * @param {{ timeoutMs?: number }} [opts]
+ * @returns {string} dest
+ */
+function downloadFileSync(url, dest, opts = {}) {
+  const { timeoutMs = 180000 } = opts;
+  const code = `
+    const https=require('https'),fs=require('fs'),path=require('path');
+    const [url,dest]=process.argv.slice(1);
+    function get(u,n){return new Promise((res,rej)=>{
+      const req=https.get(u,{timeout:120000},r=>{
+        if(r.statusCode>=300&&r.statusCode<400&&r.headers.location){
+          r.resume();
+          if(n<=0)return rej(new Error('重定向次数过多'));
+          return get(new URL(r.headers.location,u).toString(),n-1).then(res,rej);
+        }
+        if(r.statusCode!==200){r.resume();return rej(new Error('HTTP '+r.statusCode));}
+        fs.mkdirSync(path.dirname(dest),{recursive:true});
+        const tmp=dest+'.part';
+        const out=fs.createWriteStream(tmp);
+        r.pipe(out);
+        out.on('finish',()=>out.close(()=>{fs.renameSync(tmp,dest);res();}));
+        out.on('error',rej);
+      });
+      req.on('error',rej);
+      req.on('timeout',()=>req.destroy(new Error('下载超时')));
+    });}
+    get(url,5).then(()=>process.exit(0)).catch(e=>{console.error(e.message);process.exit(1);});
+  `;
+  const env = { ...process.env };
+  if (process.versions && process.versions.electron) env.ELECTRON_RUN_AS_NODE = '1';
+  runFile(process.execPath, ['-e', code, url, dest], { timeout: timeoutMs, env });
+  return dest;
+}
+
+module.exports = { runFile, resolveMmdcCli, runMmdc, downloadFile, downloadFileSync };
