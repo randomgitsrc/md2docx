@@ -14,6 +14,36 @@ const logger = require('../lib/logger');
 const { countDiagrams } = require('../lib/pipeline');
 const { Job, STATUS } = require('../jobs/job');
 
+/**
+ * 还原被 multer 按 latin1 误读的 UTF-8 文件名。
+ *
+ * 背景：HTTP multipart 的 filename 字段按 RFC 7578 是 UTF-8，但 multer/busboy
+ * 默认以 latin1 解码，于是浏览器的「测试文档.md」在服务端变成
+ * 「æµè¯ææ¡£.md」——产物文件名随之乱码（Windows 用户上传中文名必踩）。
+ * 实测：Buffer.from(name,'latin1').toString('utf8') 可精确还原。
+ *
+ * 安全性：仅当**还原后再编解码能往返一致**且结果含非 ASCII 时才采用，
+ * 避免把本就是 latin1 的合法名字（如 café 的另一种编码）弄坏。
+ */
+function decodeUploadName(originalname) {
+  const raw = String(originalname || '').replace(/\\/g, '/').split('/').pop();
+  if (!raw) return raw;
+  // 纯 ASCII 不可能被误读，直接返回
+  if (!/[-\x80-\xff]/.test(raw)) return raw;
+  try {
+    const bytes = Buffer.from(raw, 'latin1');
+    const decoded = bytes.toString('utf8');
+    // 往返校验：解出的字符串再编回 latin1 必须与原串完全相同，
+    // 否则说明原串并非"UTF-8 被误读"，保持原样。
+    if (Buffer.from(decoded, 'utf8').toString('latin1') !== raw) return raw;
+    // 替换字符 U+FFFD 说明不是合法 UTF-8 序列
+    if (decoded.includes('\uFFFD')) return raw;
+    return decoded;
+  } catch (_) {
+    return raw;
+  }
+}
+
 class HttpError extends Error {
   constructor(status, code, message) {
     super(message);
@@ -44,7 +74,7 @@ class ConversionService {
     }
 
     // 扩展名校验
-    const name = (file.originalname || '').replace(/\\/g, '/').split('/').pop();
+    const name = decodeUploadName(file.originalname);
     if (!/\.md$/i.test(name)) {
       throw new HttpError(400, 'INVALID_EXTENSION', `仅支持 .md 文件，收到: ${name}`);
     }
@@ -134,4 +164,4 @@ class ConversionService {
   }
 }
 
-module.exports = { ConversionService, HttpError };
+module.exports = { ConversionService, HttpError, decodeUploadName };
