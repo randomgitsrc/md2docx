@@ -71,7 +71,12 @@ class DependencyCheck {
   get() {
     if (!this.cache || Date.now() - this.cachedAt > this.ttlMs) {
       const r = this.probe();
-      logger.info(`[deps] 依赖探测完成: ${Object.entries(r).map(([k, v]) => `${k}=${v.ok ? '✓' : '✗'}`).join(' ')}`);
+      // 只打印各项依赖；allOk 是布尔汇总，不能按 v.ok 取值（否则永远显示 ✗）
+      const detail = Object.entries(r)
+        .filter(([k]) => k !== 'allOk')
+        .map(([k, v]) => `${k}=${v.ok ? '✓' : '✗'}`)
+        .join(' ');
+      logger.info(`[deps] 依赖探测完成: ${detail} | allOk=${r.allOk ? '✓' : '✗'}`);
       return r;
     }
     return this.cache;
