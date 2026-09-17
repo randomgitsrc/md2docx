@@ -86,9 +86,12 @@ function checkEnv() {
   const cfg = safe(() => require('../server/config'), '加载 server/config');
   if (cfg) {
     const dataDir = cfg.dataDir;
-    const inInstallDir = dataDir.startsWith(ROOT);
     out(`         数据目录: ${dataDir}`);
-    if (inInstallDir) {
+    if (process.env.DATA_DIR) {
+      // 显式指定是用户意图，不算回退——此前未区分，把显式指定误报成
+      // "回退"（构建期就是这样），会误导真机排查。
+      pass('数据目录由 DATA_DIR 显式指定');
+    } else if (dataDir.startsWith(ROOT)) {
       pass('数据目录位于安装目录内', '便携用法，删除目录即卸载');
     } else {
       warn('数据目录已回退到安装目录之外',
