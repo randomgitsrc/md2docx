@@ -17,8 +17,9 @@
 | [002](002-pipeline-drops-local-images.md) | 完整流水线丢失作者自带的本地图片 | 高 | open | `scripts/md2docx.js` `appendImageParagraph` / `convert` |
 | [003](003-bare-activity-names.md) | 旧式活动图（裸写活动名）渲染失败 | 中 | fixed | `scripts/plantuml-renderer.js` `fixBareActivityNames` |
 | [004](004-missing-table-separator-row.md) | 缺分隔行的管道表格被当作普通段落 | 高 | fixed | `scripts/preprocess.js` `repairLooseTables`、`scripts/md2docx.js` `consumeTable` |
+| [005](005-table-column-width-vertical-text.md) | 表格窄列被压到逐字竖排（列宽算法缺陷） | 中 | fixed | `scripts/md2docx.js` `consumeTable` 列宽分配段 |
 
-> 003 / 004 均由外部批量生成文档 `GMS-JD-SRS-V1.0.md`（1.4 MB，258 图 + 1289 表）
+> 003 / 004 / 005 均由外部批量生成文档 `GMS-JD-SRS-V1.0.md`（1.4 MB，258 图 + 1289 表）
 > 暴露，已实施兼容修复并完成回归；详细证据与验证见各自文档。
 
 ## 记录约定
