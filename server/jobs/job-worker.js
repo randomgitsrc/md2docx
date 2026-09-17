@@ -61,6 +61,8 @@ async function run() {
     const result = await convert(actualCleanPath, {
       outputBase: jobDir,
       srcDir: jobDir,
+      // 图片解析容器边界：作者图片随上传文件落在 jobDir，越界引用一律拒绝
+      imageRoot: jobDir,
       outputPath: docxPath,
       onProgress: (inner, message) => emit('progress', {
         value: toPercent(inner, 60, 100),

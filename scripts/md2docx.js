@@ -328,7 +328,14 @@ class Md2DocxConverter {
   constructor(opts = {}) {
     this.tmpDir = opts.tmpDir || fs.mkdtempSync(path.join(os.tmpdir(), 'md2docx-'));
     this.inputDir = opts.inputDir || process.cwd();
+    // 图片来源解析目录：用于解析 markdown 里作者自带的 `![](相对路径)`。
+    // 与 inputDir 分开是必要的——两阶段流水线里 inputDir 是 output/clean/，
+    // 而作者的图片在源文件旁边，用 inputDir 解析必然找不到（见 docs/issues/002）。
+    // 兼容性：以 clean.md 所在目录解析也常见（preprocess 渲染出的图表 PNG 就是
+    // 相对 cleanDir 引用的），故最终解析时两个基准都会尝试。
     this.srcDir = opts.srcDir || this.inputDir;
+    // 图片解析的容器边界（用户上传场景传 jobDir；不传表示无隔离需求）
+    this.imageRoot = opts.imageRoot || null;
     this.md = new MarkdownIt({
       html: true, breaks: false, linkify: true, typographer: false,
     });
@@ -347,15 +354,27 @@ class Md2DocxConverter {
     this.startPortraitSection();
   }
 
-  // 开启新的竖置 section
+  // 开启新的竖置 section。
+  // 若当前 section 还是空的（尚未写入任何内容）则**复用**它，只改朝向，
+  // 不再另起一个——否则会留下一个零内容的空节（Word 里表现为空白页）。
+  // 触发场景：连续两张横置图时，前一张图之后的"恢复竖置"会先建出一个空竖置节，
+  // 紧接着后一张图又把当前节切成横置；中间那个竖置节永远没机会写入内容。
   startPortraitSection() {
+    if (this.currentSection && this.currentSection.children.length === 0) {
+      this.currentSection.orientation = 'portrait';
+      return;
+    }
     const sec = { orientation: 'portrait', children: [] };
     this.sections.push(sec);
     this.currentSection = sec;
   }
 
-  // 开启新的横置 section
+  // 开启新的横置 section（空节同样复用，理由见上）
   startLandscapeSection() {
+    if (this.currentSection && this.currentSection.children.length === 0) {
+      this.currentSection.orientation = 'landscape';
+      return;
+    }
     const sec = { orientation: 'landscape', children: [] };
     this.sections.push(sec);
     this.currentSection = sec;
@@ -393,6 +412,20 @@ class Md2DocxConverter {
     let i = 0;
     while (i < tokens.length) {
       i = this.consumeToken(tokens, i);
+    }
+    // 收尾：去掉末尾可能残留的零内容空节。
+    // 场景：文档以「横置图 + 图注」结尾时，图注推入横置节后会立刻
+    // resumePortraitSection() 建出一个竖置节，但后面已无 token 写入，
+    // 该空节会变成一张多余空白页。中间的空节已由 startXxxSection() 的
+    // 空节复用逻辑消除，这里只处理末尾。
+    while (this.sections.length > 0 &&
+           this.sections[this.sections.length - 1].children.length === 0) {
+      this.sections.pop();
+    }
+    // 极端情况：整篇没有任何正文内容。保证至少留一个节，避免生成的
+    // 文档没有正文节（封面/目录仍由 convert() 另外装配）。
+    if (this.sections.length === 0) {
+      this.startPortraitSection();
     }
     return this.sections;
   }
@@ -680,12 +713,51 @@ class Md2DocxConverter {
   }
 
   // ---------- 图片段落(预处理后的 Mermaid PNG 等) ----------
+  //
+  // 路径解析：按候选基准目录依次尝试，取第一个存在的文件。
+  //   1) inputDir —— clean.md 所在目录。markdown 语义上引用本就是相对本文档的，
+  //                  故**优先生效**：这样 preprocess 渲染出的图表 PNG（相对 cleanDir
+  //                  引用，如 ../.mermaid/x.png）行为与改动前完全一致，零回归。
+  //   2) srcDir   —— 作者源文件所在目录，兜底解析作者自带的 `![](pics/x.png)`。
+  // 两阶段流水线里两者必然不同（inputDir=<源目录>/output/clean、srcDir=<源目录>），
+  // 只认其一就会出现"作者图片丢失"或"渲染图表丢失"（见 docs/issues/002）。
+  //
+  // 安全：当 opts.imageRoot 指定时，解析结果必须落在该目录内，否则视为找不到。
+  // 这是 HTTP 服务的必需防护——服务端 srcDir=jobDir、inputDir=jobDir/clean，
+  // 若无此守卫，`![](../x.png)` 经 srcDir 解析会越过作业目录读到别的作业甚至宿主任意文件
+  // （而 sanitizeImageRefs 只按 cleanDir 基准校验，会放行该引用）。
+  // CLI/本地使用不传 imageRoot（用户自己的文件，无隔离需求）。
+  resolveImagePath(decodedSrc) {
+    const bases = [];
+    for (const b of [this.inputDir, this.srcDir]) {
+      if (b && !bases.includes(b)) bases.push(b);
+    }
+    const candidates = [];
+    for (const base of bases) {
+      const p = path.resolve(base, decodedSrc);
+      // 容器边界守卫：越界即跳过（不报错，按"未找到"处理）
+      if (this.imageRoot) {
+        const rel = path.relative(this.imageRoot, p);
+        if (rel.startsWith('..') || path.isAbsolute(rel)) continue;
+      }
+      candidates.push(p);
+      if (fs.existsSync(p)) return { path: p, candidates };
+    }
+    return { path: null, candidates };
+  }
+
   appendImageParagraph(src, alt) {
     // markdown-it 会 URL 编码路径，需要解码
-    const decodedSrc = decodeURIComponent(src);
-    const imgPath = path.resolve(this.inputDir, decodedSrc);
-    if (!fs.existsSync(imgPath)) {
-      console.warn(`  [md2docx] 图片未找到: ${imgPath}，降级为文字`);
+    let decodedSrc;
+    try {
+      decodedSrc = decodeURIComponent(src);
+    } catch (_) {
+      decodedSrc = src;  // 非法百分号编码（如 100%.png）时按原文处理
+    }
+    const { path: imgPath, candidates } = this.resolveImagePath(decodedSrc);
+    if (!imgPath) {
+      console.warn(`  [md2docx] 图片未找到: ${decodedSrc}`);
+      console.warn(`            已尝试: ${candidates.join(' , ') || '(无可用的解析基准)'}`);
       this.currentSection.children.push(new Paragraph({
         alignment: AlignmentType.CENTER, indent: { firstLine: 0 },
         children: [new TextRun({ text: `[图片缺失: ${src}]`, ...runFont(FONT.仿宋, SIZE.小四) })],
@@ -1325,7 +1397,8 @@ doc.save(sys.argv[1])
 // convert(cleanPath, opts) — 可编程 API（HTTP 服务经此复用）
 // opts:
 //   outputBase     — 输出基础目录（默认自动推导）
-//   srcDir         — 图片引用解析目录（默认 outputBase）
+//   srcDir         — 作者源文件目录（图片引用解析基准之一；默认 outputBase）
+//   imageRoot      — 图片解析的容器边界；越界引用视为不存在（HTTP 服务传 jobDir）
 //   outputPath     — 显式指定输出 docx 路径（默认 outputBase/output/docx/）
 //   onProgress     — (percent, message) 进度回调（0-100）
 //   onLog          — (line) 日志行回调
@@ -1388,7 +1461,10 @@ async function convert(cleanPath, opts = {}) {
   const numberingConfig = buildNumberingConfig(listPoolSize);
 
   // 转换正文
-  const converter = new Md2DocxConverter({ inputDir, srcDir, listPoolSize });
+  const converter = new Md2DocxConverter({
+    inputDir, srcDir, listPoolSize,
+    imageRoot: opts.imageRoot || null,
+  });
   const converterSections = converter.convert(content);
   if (opts.onProgress) opts.onProgress(70, '解析并转换正文');
   report.log(`[md2docx] 正文段落/元素数: ${converterSections.reduce((sum, sec) => sum + sec.children.length, 0)}`);
