@@ -310,6 +310,10 @@ async function main() {
     '【数据位置】',
     '  服务上传产生的作业文件在  本目录\\data\\  下，可随时整体删除。',
     '',
+    '【遇到问题先自检】',
+    '  双击  自检.cmd  —— 会逐项检查环境/浏览器/两种图表渲染/端到端转换，',
+    '  并把结果写到本目录的 self-check-report.txt。请把该文件回传以便定位。',
+    '',
     '【不污染系统】',
     '  不改 PATH、不写全局注册表、不安装任何系统组件；删除本目录即完全卸载。',
     '',
@@ -326,6 +330,9 @@ async function main() {
     '',
     '注：本目录代码是构建时的快照；改了源码需重新运行 build-windows-bundle.js。',
   ].join('\r\n') + '\r\n', 'utf8');
+
+  // 放入目标机自检入口（双击即出报告，便于回传定位问题）
+  addSelfCheckEntry(BUNDLE_DIR);
 
   // ---- 打包前闸门：先证明这个包是对的，再打包 ----
   verifyBundleCode(BUNDLE_DIR);
@@ -363,6 +370,7 @@ async function main() {
   if (installer) log(`  安装器: ${installer.path}  (${human(installer.size)})`);
   log(`  代码版本: ${stamp.git} @ ${stamp.time}`);
   log(`  目标机：解压 → 双击「启动 md2docx.cmd」→ 浏览器自动打开`);
+  log(`  排障用：目标机双击「自检.cmd」可产出可回传的自检报告`);
 
 
 /**
@@ -424,72 +432,76 @@ function verifyBundleCode(bundleDir) {
  * 自检用例刻意覆盖近期修过的缺陷路径：
  *   002 作者本地图片可解析 / 003 裸写活动名的活动图 / 004 无分隔行的键值表
  */
+/**
+ * 构建后：用**包内**代码与依赖跑自检。
+ *
+ * 直接复用包自带的目标机自检脚本（scripts/self-check.js）而非另写一套：
+ *  · 构建期验的就是"目标机将要跑的那份代码"，避免两套校验逻辑漂移
+ *  · 自检覆盖运行环境/浏览器/PlantUML(中文)/mermaid/端到端五组检查，
+ *    比只验一次转换更强
+ * 带 --allow-no-browser：构建机可能没浏览器，此时渲染类检查降级为跳过，
+ * 不因此中断构建（真机仍应跑一次完整自检）。
+ */
 function smokeTestBundle(bundleDir) {
-  log('附加步骤：包自检（用包内代码 + 包内依赖跑真实转换）');
-
-  let chrome = null;
-  try { chrome = require(path.join(ROOT, 'scripts', 'puppeteer-config')).findChrome(); } catch (_) { /* 无 */ }
-  if (!chrome) {
-    log('  ⚠ 本机无可用浏览器 → 跳过渲染类自检');
-    log('    Windows 真机务必验证（清单见 docs/deployment/windows-offline.md §7）');
-    return;
-  }
-
+  log('附加步骤：包自检（复用包内 scripts/self-check.js）');
   const work = path.join(TEMP, 'smoke');
   fs.rmSync(work, { recursive: true, force: true });
-  fs.mkdirSync(path.join(work, 'assets'), { recursive: true });
+  fs.mkdirSync(work, { recursive: true });
 
-  // 本地图片（覆盖缺陷 002：作者自带图片必须能解析）
-  const imgSrc = path.join(ROOT, 'md', 'qa', 'local-image', 'assets', 'diagram.png');
-  if (fs.existsSync(imgSrc)) fs.copyFileSync(imgSrc, path.join(work, 'assets', 'diagram.png'));
-
-  const md = path.join(work, 'smoke.md');
-  fs.writeFileSync(md, [
-    '---', 'title: 离线包自检', 'company: 自检', 'date: 2026年9月', '---', '',
-    '# 离线包自检', '',
-    '## 流程图（mermaid）', '', '```mermaid', 'graph TD', '    A[开始] --> B[结束]', '```', '',
-    '## 活动图（裸写活动名，缺陷 003）', '', '```plantuml', '@startuml', 'start',
-    '接收外部输入或操作指令', 'stop', '@enduml', '```', '',
-    '## 键值表（无分隔行，缺陷 004）', '',
-    '| 需求名称 | 加载本地基础影像数据 |',
-    '| 需求标识 | GMS-JD-ZCCX-010 |', '',
-    '## 作者本地图片（缺陷 002）', '',
-    '![架构图](assets/diagram.png)', '',
-  ].join('\n'), 'utf8');
-
+  const env = {
+    ...process.env,
+    PLANTUML_BACKEND: 'core',
+    DATA_DIR: path.join(work, 'data'),
+  };
+  // 有浏览器就显式指定，让渲染类检查真正跑起来
   try {
-    execFileSync(process.execPath, [path.join(bundleDir, 'scripts', 'cli.js'), md], {
-      cwd: bundleDir,
-      stdio: 'pipe',
-      timeout: 600000,
-      env: {
-        ...process.env,
-        PLANTUML_BACKEND: 'core',
-        PUPPETEER_EXECUTABLE_PATH: chrome,
-        DATA_DIR: path.join(work, 'data'),
-      },
-    });
+    const c = require(path.join(ROOT, 'scripts', 'puppeteer-config')).findChrome();
+    if (c) env.PUPPETEER_EXECUTABLE_PATH = c;
+  } catch (_) { /* 无浏览器，交给 --allow-no-browser 处理 */ }
+
+  let output = '';
+  let ok = true;
+  try {
+    output = execFileSync(
+      process.execPath,
+      [path.join(bundleDir, 'scripts', 'self-check.js'), '--allow-no-browser'],
+      { cwd: work, stdio: 'pipe', timeout: 900000, env },
+    ).toString();
   } catch (e) {
-    const tail = ((e.stdout || '') + (e.stderr || '')).toString().trim()
-      .split('\n').slice(-6).join('\n    ');
-    fail(`包自检失败：包内代码无法完成转换\n    ${tail}`);
+    ok = false;
+    output = ((e.stdout || '') + (e.stderr || '')).toString();
   }
 
-  const docx = path.join(work, 'output', 'docx', 'smoke.docx');
-  if (!fs.existsSync(docx)) fail('包自检失败：未产出 DOCX');
-  const AdmZip = require(path.join(ROOT, 'node_modules', 'adm-zip'));
-  const xml = new AdmZip(docx).readAsText('word/document.xml');
-  const drawings = (xml.match(/<w:drawing>/g) || []).length;
-  const tables = (xml.match(/<w:tbl>/g) || []).length;
-
-  const problems = [];
-  if (drawings < 3) problems.push(`图片数 ${drawings}，期望 ≥3（mermaid + 活动图 + 作者本地图）`);
-  if (tables < 1) problems.push(`表格数 ${tables}，期望 ≥1（无分隔行表格应被修复成真表格）`);
-  if (xml.includes('图片缺失')) problems.push('出现「图片缺失」占位');
-  if (problems.length > 0) {
-    fail('包自检断言未通过：\n' + problems.map((x) => '    ' + x).join('\n'));
+  // 把自检的关键行转述到构建日志（完整报告留在 work 目录里）
+  const keep = output.split('\n').filter((l) =>
+    /\[通过\]|\[失败\]|\[注意\]|汇总|全部通过|存在 \d+ 项失败/.test(l));
+  for (const l of keep) log('  ' + l.trim());
+  if (!ok) {
+    fail(`包自检未通过（完整报告：${path.join(work, 'self-check-report.txt')}）`);
   }
-  log(`  通过：图 ${drawings} 张（含裸活动名）、表 ${tables} 个（无分隔行已修复）、无图片缺失`);
+}
+
+/**
+ * 构建后：把目标机自检脚本与一键自检入口放进包里。
+ * 用户双击「自检.cmd」即可产出可回传的报告。
+ */
+function addSelfCheckEntry(bundleDir) {
+  fs.writeFileSync(path.join(bundleDir, '自检.cmd'), [
+    '@echo off',
+    'chcp 65001 >nul',
+    'setlocal',
+    'cd /d "%~dp0"',
+    'set "PLANTUML_BACKEND=core"',
+    'if exist "%~dp0chrome-headless-shell\\chrome-headless-shell.exe" set "PUPPETEER_EXECUTABLE_PATH=%~dp0chrome-headless-shell\\chrome-headless-shell.exe"',
+    'echo 正在自检，请稍候（首次运行约需 1-2 分钟）...',
+    'echo.',
+    '"%~dp0node.exe" "%~dp0scripts\\self-check.js" --report',
+    'echo.',
+    'echo 报告已保存到本目录的 self-check-report.txt',
+    'echo 若有不通过项，请把该文件完整回传。',
+    'pause',
+    'endlocal',
+  ].join('\r\n') + '\r\n', 'utf8');
 }
 
 /** 让 makensis 可用：优先 PATH，否则本地解包 Linux 版 NSIS（不改系统、不需 root） */
