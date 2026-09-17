@@ -18,6 +18,7 @@ const fs = require('fs');
 const path = require('path');
 const { execSync } = require('child_process');
 const os = require('os');
+const { runMmdc } = require('./exec-util');
 
 // markdown-it 与 gray-matter 装在全局,通过 NODE_PATH 引入
 const matter = require('gray-matter');
@@ -214,7 +215,6 @@ function renderMermaid(mermaidCode, tmpDir, index) {
   const outFile = path.join(tmpDir, `m_${index}.png`);
 
   const cfgPath = generateConfig(tmpDir);
-  const cfgArg = cfgPath ? `-p ${cfgPath}` : '';
 
   // 注入 init 指令：使用直线连线，去除"AI味"
   const hasUserInit = /^%%\{init:/m.test(mermaidCode);
@@ -224,8 +224,17 @@ function renderMermaid(mermaidCode, tmpDir, index) {
 
   fs.writeFileSync(inFile, mermaidCode);
   const mmdcDir = path.resolve(__dirname, '..');
-  execSync(`npx mmdc -i ${inFile} -o ${outFile} -b white -w ${renderWidth} -H 2400 ${cfgArg}`,
-    { stdio: 'pipe', cwd: mmdcDir });
+  // 参数数组传递（不经 shell）：路径含空格/中文时不会被拆坏；
+  // 同时不经 npx，省掉每次包解析开销。
+  const mmdcArgs = [
+    '-i', inFile,
+    '-o', outFile,
+    '-b', 'white',
+    '-w', String(renderWidth),
+    '-H', '2400',
+  ];
+  if (cfgPath) mmdcArgs.push('-p', cfgPath);
+  runMmdc(mmdcArgs, { cwd: mmdcDir });
 
   // 读出 PNG,顺便取宽高用于 docx 嵌入时计算缩放
   const buffer = fs.readFileSync(outFile);

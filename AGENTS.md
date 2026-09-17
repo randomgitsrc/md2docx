@@ -77,6 +77,7 @@ md2docx 转换时，mermaid 与 PlantUML 图表**默认注入灰阶/黑白主题
 8. **PlantUML 结束标记**：块内只有 `@startuml` 而漏 `@enduml` 时，PlantUML 退出码仍为 0、只在 stderr 提示 `No diagram found` 且不产文件。`ensureEndMarker()` 会自动补全；报错行号需减去注入的 theme/font 行数偏移（`buildRenderError` 的 `injectedLineOffset`），否则指向错误源码行。回归用例：`md/qa/plantuml-no-end.md`。
 9. **PlantUML 名称需加引号**：组件/节点名含 `()`、`/`、`-` 等字符时不加引号会被当成表达式解析而渲染失败（如 `c3 as 服务进程通信(消息队列)`、`sjwz --> GMS-DM-BWJC : ...`）。正确写法：`c3 as "服务进程通信(消息队列)"`、`sjwz --> "GMS-DM-BWJC" : ...`。此类失败按约定降级为代码块，不影响整篇转换；渲染失败后会自动尝试补引号（`fixUnquotedNames`）。
 10. **必须在读取后统一换行为 LF**：JS 正则中 `.` **不匹配 `\r`**（`\r` 属行终止符），CRLF 文件里不带 `m` 标志的 `...$` 会因行尾残留 `\r` 而失配。后果是**静默失效**（不报错、只是没生效）：题注加粗、标题手写编号剥离、列表手动编号剥离全部不工作，且 `\s*` 恰好吃掉 `\r` 的情况还会造成"部分生效"的假象（如仅编号题注 `表 3-354` 能中、带名称的 `表 3-01 名称` 不能）。preprocess 与 md2docx 读取后都必须执行 `.replace(/\r\n?/g, '\n')`。回归用例：`md/qa/crlf-test.md`。
+11. **外部命令必须用参数数组、不经 shell**（跨平台硬规则）：一律走 `scripts/exec-util.js` 的 `runFile`/`runMmdc`（内部 `execFileSync` + 数组），**禁止**再用模板字符串拼命令行。原因：路径含空格或中文（`C:\Program Files\…`、`D:\项目 (2026)\…`、`C:\Users\张三\…`）时字符串拼命令会被 shell 拆开参数——历史 bug 就是固定 `-i/-o` 加了引号、而 `-p` 漏了引号，导致**路径含空格时 mermaid 静默降级为代码块**（报 `error: too many arguments`）。另外 Windows 下 `node_modules/.bin/mmdc` 是 `.cmd` shim，不能当可执行文件直调，故统一用 `node <mermaid-cli>/src/cli.js`；Electron 打包后 `process.execPath` 是 Electron 本体，需 `ELECTRON_RUN_AS_NODE=1` 才以 Node 模式运行（`runMmdc` 已处理）。
 
 ## 工作流程：计划 → 评审 → 实施
 
@@ -112,5 +113,5 @@ md2docx 转换时，mermaid 与 PlantUML 图表**默认注入灰阶/黑白主题
 2. 用 Word/LibreOffice 打开检查：章节编号、题注位置、表格跨页、横置大图、页码连续性（竖→横→竖）。
 3. 图表验证：检查 `md/output/.mermaid/`、`.plantuml/` 的 PNG 为黑白灰风格（无彩色）；用户显式配置主题的图保留彩色。
 4. 外部依赖：mmdc 需 Chrome/Chromium（`scripts/puppeteer-config.js` 自动探测）；PlantUML 需 Java + graphviz + `bin/plantuml.jar`（首次自动下载）。缺依赖时图表降级为代码块，不报致命错误。
-5. mmdc 按 `node_modules/.bin/mmdc` **直调二进制**（不走 `npx`，避免每次包解析开销，并发场景收益明显）——不要改回 `npx mmdc`。
+5. mmdc 统一走 `exec-util.runMmdc()`（`node <mermaid-cli>/src/cli.js` + 参数数组，不经 shell，也不走 `npx`）——不要改回 `npx mmdc` 或模板字符串拼命令，原因见「已知陷阱」第 11 条。
 6. HTTP 服务：`node server/app.js` 起服务；`curl /api/health` 应返回全部依赖 ✓。前端 E2E 需本机 Chrome CDP：`NODE_PATH=$(npm root -g) node scripts/e2e-web.js`；无 CDP 环境时用 curl 走 API 全流程代替（见 `docs/api.md`）。

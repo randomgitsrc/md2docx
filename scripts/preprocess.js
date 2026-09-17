@@ -25,6 +25,7 @@ const matter = require('gray-matter');
 const yaml = require('js-yaml');
 const { generateConfig } = require('./puppeteer-config');
 const { renderPlantUML } = require('./plantuml-renderer');
+const { runMmdc } = require('./exec-util');
 
 // =========================================================================
 // 0. 共享常量
@@ -36,10 +37,9 @@ const MERMAID_HEIGHT = 2400;
 const MERMAID_RETRY_WIDTH = 1600;
 const MERMAID_RETRY_HEIGHT = 900;
 
-// mmdc 二进制路径（评审 M7：直调二进制，消除 npx 每次包解析开销）
-function resolveMmdcBinary() {
-  return path.join(__dirname, '..', 'node_modules', '.bin', 'mmdc');
-}
+// mmdc 调用统一走 exec-util.runMmdc()：用当前 node 执行 mermaid-cli 的 cli.js，
+// 参数以数组传递（不经 shell）。Windows 下 node_modules/.bin/mmdc 是 .cmd shim，
+// 不能直接当可执行文件调用；且字符串拼命令在路径含空格时会失败。
 
 // =========================================================================
 // 0. 进度提示工具
@@ -261,13 +261,16 @@ function renderMermaidBlocks(content, dirs, baseName, hooks = {}) {
       try {
         fs.writeFileSync(mmdPath, mermaidCode);
         const cfgPath = generateConfig(mermaidDir);
-        const cfgArg = cfgPath ? `-p ${cfgPath}` : '';
-        // 直调 mmdc 二进制（评审 M7），cwd 设为项目根以解析依赖
-        const mmdcBin = resolveMmdcBinary();
-        execSync(
-          `"${mmdcBin}" -i "${mmdPath}" -o "${pngPath}" -b white -w ${MERMAID_WIDTH} -H ${MERMAID_HEIGHT} ${cfgArg}`,
-          { stdio: 'pipe', timeout: 30000, cwd: path.resolve(__dirname, '..') }
-        );
+        // 参数以数组传递（不经 shell）：路径含空格/中文时才不会被拆坏
+        const args = [
+          '-i', mmdPath,
+          '-o', pngPath,
+          '-b', 'white',
+          '-w', String(MERMAID_WIDTH),
+          '-H', String(MERMAID_HEIGHT),
+        ];
+        if (cfgPath) args.push('-p', cfgPath);
+        runMmdc(args, { timeout: 30000, cwd: path.resolve(__dirname, '..') });
         rendered = fs.existsSync(pngPath);
       } catch (e) {
         logWarnDuringRender(`[mermaid] 渲染失败 (图${figureIndex}): ${e.message}`);
@@ -306,12 +309,15 @@ function renderMermaidBlocks(content, dirs, baseName, hooks = {}) {
         try {
           fs.writeFileSync(mmdPath, fixedCode);
           const cfgPath = generateConfig(mermaidDir);
-          const cfgArg = cfgPath ? `-p ${cfgPath}` : '';
-          const mmdcBin = resolveMmdcBinary();
-          execSync(
-            `"${mmdcBin}" -i "${mmdPath}" -o "${pngPath}" -b white -w ${MERMAID_RETRY_WIDTH} -H ${MERMAID_RETRY_HEIGHT} ${cfgArg}`,
-            { stdio: 'pipe', timeout: 30000, cwd: path.resolve(__dirname, '..') }
-          );
+          const args = [
+            '-i', mmdPath,
+            '-o', pngPath,
+            '-b', 'white',
+            '-w', String(MERMAID_RETRY_WIDTH),
+            '-H', String(MERMAID_RETRY_HEIGHT),
+          ];
+          if (cfgPath) args.push('-p', cfgPath);
+          runMmdc(args, { timeout: 30000, cwd: path.resolve(__dirname, '..') });
           rendered = fs.existsSync(pngPath);
           if (rendered) {
             console.warn(`  [mermaid] 修复成功，图${figureIndex} 已渲染`);
