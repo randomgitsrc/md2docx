@@ -246,10 +246,10 @@ async function refreshHealth() {
   try {
     const res = await fetch('/api/health');
     const d = await res.json();
-    for (const key of ['node', 'chrome', 'java', 'graphviz', 'python', 'pythonDocx']) {
+    for (const key of ['node', 'chrome', 'plantuml', 'java', 'graphviz']) {
       const badge = $(`#dep-${key}`);
       const dep = d.deps?.[key];
-      const nameMap = { node: 'Node', chrome: 'Chrome', java: 'Java', graphviz: 'Graphviz', python: 'Python', pythonDocx: 'python-docx' };
+      const nameMap = { node: 'Node', chrome: 'Chrome', plantuml: 'PlantUML', java: 'Java', graphviz: 'Graphviz' };
       if (badge) {
         if (dep?.ok) {
           badge.textContent = `${nameMap[key]} ✓`;

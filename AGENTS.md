@@ -70,7 +70,7 @@ md2docx 转换时，mermaid 与 PlantUML 图表**默认注入灰阶/黑白主题
 1. **双路渲染差异**：preprocess 已把图表渲染为 PNG 后，md2docx 走「图片引用」路径（按 PNG 实际尺寸判断横置：`downscaleRatio > 3 && aspectRatio > 2.0`）；直接跑 md2docx.js 时，mermaid/plantuml fence 由 md2docx 自己渲染（mermaid 按源码拓扑 `widthScore > 5` 判断横置）。同一图在两条路径下横置行为可能不同——**改横置逻辑必须两处都验证**。
 2. **列表编号池**：每个顶层列表分配独立 numbering reference（`list-l1/l2/l3-N` 池）使编号从 1 重新开始；池大小由 `countTopLevelLists` 动态预算。**绝不回绕复用 numId**（历史 bug：复用会导致编号延续上一组）。池耗尽会抛错暴露问题，这是故意的——不要改成静默复用。
 3. **横置 section 与 pendingLandscapeClose**：大图横置用独立 section，靠 `pendingLandscapeClose` 标志延迟恢复竖置（图注进来才关；无图注时遇到下一个非题注 token 也关）。题注若写在图片**前**，`keepNext` 无法把图片和图注绑定，分页控制失效。
-4. **分页后处理**：`patchDocxPagination()` 用 python-docx 注入 `cantSplit`/`keepNext`/`keepLines`（依赖 python3 + python-docx）。改分页相关逻辑时，docx.js 样式层与后处理层**不要重复注入**。
+4. **分页属性由 docx 库原生输出，不要再引入 python-docx**：`cantSplit`（`TableRow`）、`keepNext`/`keepLines`（Caption 段落、表头行首段）现在直接由 docx 库写出——**库做不到这些属性是错误认知**（旧注释如此声称，实测可输出）。`patchDocxPagination()`（python-docx 版）保留为回退开关 `ENABLE_PAGINATION_PATCH=1`，默认不执行。等价性经真实文档实测（4427 表格行 + 13514 段落，0 处差异，工具：`scripts/compare-pagination.js`）。改分页逻辑时注意样式层与回退层**不要重复注入**。
 5. **mermaid init 注入位置**：必须在写入 `.mmd` 文件**前**注入。preprocess 已渲染所有 mermaid，md2docx.js 的 init 注入只是兜底（实践中几乎不触发）。
 6. **图片缩放**：竖置 `fitImageToPage` / 横置 `fitImageToLandscape` 都先按宽缩放再 clamp 高度；`CONTENT_HEIGHT_PX` 用 0.90 系数（为标题/图注留余量）。
 7. **宽表列宽必须逐列分摊差值**：列数多时（如 33 列的位域表），若列宽下限（8%）总和超过页面总宽，把差值一次性加到"最大列"上会把该列压成负数，触发 docx 抛 `Invalid value '-N' specified. Must be a positive integer.`（整篇转换失败）。因此下限取 `min(8%, 总宽/列数)`，差值**逐列 ±1 分摊**，且取值处不能用 `||` 兜底（负值在 JS 中为 truthy）。回归用例：`md/qa/wide-table.md`。
@@ -112,6 +112,10 @@ md2docx 转换时，mermaid 与 PlantUML 图表**默认注入灰阶/黑白主题
 1. 端到端：`./scripts/md2docx.sh md/测试文档.md`，检查 `md/output/docx/` 生成的 DOCX。
 2. 用 Word/LibreOffice 打开检查：章节编号、题注位置、表格跨页、横置大图、页码连续性（竖→横→竖）。
 3. 图表验证：检查 `md/output/.mermaid/`、`.plantuml/` 的 PNG 为黑白灰风格（无彩色）；用户显式配置主题的图保留彩色。
-4. 外部依赖：mmdc 需 Chrome/Chromium（`scripts/puppeteer-config.js` 自动探测）；PlantUML 需 Java + graphviz + `bin/plantuml.jar`（首次自动下载）。缺依赖时图表降级为代码块，不报致命错误。
+4. 外部依赖（已大幅收敛，两平台一致）：
+   - **必需**：`node`；`chrome`（Chrome/Chromium/Edge 任一，`puppeteer-config.js` 自动探测）；`plantuml`（PATH 中的 `plantuml`、`bin/` 下的原生 exe、或 `bin/plantuml.jar` 任一）。
+   - **可选**：`java` 仅在 PlantUML 走 jar 方式时需要（用官方 native exe 则免）；`graphviz` 可被 PlantUML 内置 Smetana 布局替代。
+   - **已移除**：`python3` + `python-docx`——分页属性改由 docx 库原生输出（见「已知陷阱」第 4 条）。
+   - 缺依赖时图表降级为代码块，不报致命错误。`/api/health` 的 `status` 只看必需项。
 5. mmdc 统一走 `exec-util.runMmdc()`（`node <mermaid-cli>/src/cli.js` + 参数数组，不经 shell，也不走 `npx`）——不要改回 `npx mmdc` 或模板字符串拼命令，原因见「已知陷阱」第 11 条。
 6. HTTP 服务：`node server/app.js` 起服务；`curl /api/health` 应返回全部依赖 ✓。前端 E2E 需本机 Chrome CDP：`NODE_PATH=$(npm root -g) node scripts/e2e-web.js`；无 CDP 环境时用 curl 走 API 全流程代替（见 `docs/api.md`）。

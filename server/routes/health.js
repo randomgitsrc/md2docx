@@ -15,10 +15,9 @@ module.exports = function healthRoutes({ deps }) {
       deps: {
         node: d.node,
         chrome: d.chrome,
+        plantuml: d.plantuml,
         java: d.java,
         graphviz: d.graphviz,
-        python: d.python,
-        pythonDocx: d.pythonDocx,
       },
     });
   });
