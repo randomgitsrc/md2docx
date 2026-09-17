@@ -36,6 +36,7 @@ const OUT_DIR = path.resolve(optVal('--out', path.join(ROOT, 'dist')));
 const BUNDLE_NAME = 'md2docx-win-x64';
 const BUNDLE_DIR = path.join(OUT_DIR, BUNDLE_NAME);
 const SKIP_CHROMIUM = opt('--skip-chromium');
+const MAKE_INSTALLER = opt('--installer');   // 额外产出 Windows 一键安装器（EXE）
 const TEMP = path.join(os.tmpdir(), `md2docx-bundle-${Date.now()}`);
 const KEEP_TEMP = opt('--keep-temp');
 
@@ -336,12 +337,129 @@ async function main() {
 
   const stats = dirStats(BUNDLE_DIR);
   const zipSize = fs.statSync(zipPath).size;
+
+  // 可选：一键安装器（EXE）
+  let installer = null;
+  if (MAKE_INSTALLER) {
+    installer = await buildInstaller(BUNDLE_DIR, `${BUNDLE_NAME}.zip`, stamp, nodeVer);
+  }
   log('');
   log('=== 完成 ===');
   log(`  目录: ${BUNDLE_DIR}  (${human(stats.bytes)}, ${stats.files} 个文件)`);
   log(`  压缩: ${zipPath}  (${human(zipSize)})`);
+  if (installer) log(`  安装器: ${installer.path}  (${human(installer.size)})`);
   log(`  代码版本: ${stamp.git} @ ${stamp.time}`);
   log(`  目标机：解压 → 双击「启动 md2docx.cmd」→ 浏览器自动打开`);
+
+
+/** 让 makensis 可用：优先 PATH，否则本地解包 Linux 版 NSIS（不改系统、不需 root） */
+async function ensureMakensis() {
+  // 1) PATH 中已有
+  try {
+    execFileSync('makensis', ['-VERSION'], { stdio: 'pipe' });
+    return { bin: 'makensis', dir: process.env.NSISDIR || null };
+  } catch (_) { /* 继续 */ }
+
+  // 2) 本地解包（Ubuntu 归档的 nsis + nsis-common 两个 deb）
+  const base = process.env.NSIS_DEB_BASE
+    || 'http://archive.ubuntu.com/ubuntu/pool/universe/n/nsis';
+  const nsisDeb = path.join(TEMP, 'nsis.deb');
+  const commonDeb = path.join(TEMP, 'nsis-common.deb');
+  try {
+    await download(`${base}/nsis_3.09-4ubuntu1_amd64.deb`, nsisDeb);
+    await download(`${base}/nsis-common_3.09-4ubuntu1_all.deb`, commonDeb);
+  } catch (e) {
+    log(`  未能下载 NSIS（${e.message}）→ 跳过安装器生成`);
+    return null;
+  }
+  const root = path.join(TEMP, 'nsis-root');
+  fs.mkdirSync(root, { recursive: true });
+  try {
+    for (const deb of [nsisDeb, commonDeb]) {
+      execFileSync('dpkg-deb', ['-x', deb, root], { stdio: 'pipe' });
+    }
+  } catch (e) {
+    log(`  解包 NSIS 失败（${e.message}）→ 跳过安装器生成`);
+    return null;
+  }
+  const bin = path.join(root, 'usr', 'bin', 'makensis');
+  const dir = path.join(root, 'usr', 'share', 'nsis');
+  if (!fs.existsSync(bin) || !fs.existsSync(dir)) {
+    log('  NSIS 文件不完整 → 跳过安装器生成');
+    return null;
+  }
+  fs.chmodSync(bin, 0o755);
+  return { bin, dir };
+}
+
+/** 生成并编译 Windows 一键安装器（NSIS，交叉编译，无需 Windows） */
+async function buildInstaller(bundleDir, zipName, stamp, nodeVer) {
+  log('附加步骤：生成 Windows 一键安装器（NSIS）');
+  const nsis = await ensureMakensis();
+  if (!nsis) return null;
+
+  // 版本号取自 package.json
+  let appVer = '1.0.0';
+  try { appVer = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8')).version || appVer; } catch (_) {}
+  const outExe = path.join(OUT_DIR, `md2docx-Setup-${appVer}-win-x64.exe`);
+
+  // 每用户安装（$LOCALAPPDATA）：无需管理员、不触发 UAC，契合"不污染系统"
+  // 用 String.raw 保持反斜杠原样：普通模板串会把 \P、\m、\$ 这类
+  // 无效转义的反斜杠吞掉（`"$LOCALAPPDATA\Programs"` → `"$LOCALAPPDATAPrograms"`），
+  // 导致 NSIS 里所有 Windows 路径与注册表键全部损坏。
+  const nsi = String.raw`
+Unicode true
+SetCompressor /SOLID lzma
+Name "md2docx 文档转换工具"
+OutFile "${outExe.replace(/\\/g, '/')}"
+InstallDir "$LOCALAPPDATA\Programs\md2docx"
+InstallDirRegKey HKCU "Software\md2docx" "InstallDir"
+RequestExecutionLevel user
+
+!include "MUI2.nsh"
+!define MUI_ABORTWARNING
+!insertmacro MUI_PAGE_DIRECTORY
+!insertmacro MUI_PAGE_INSTFILES
+!insertmacro MUI_UNPAGE_CONFIRM
+!insertmacro MUI_UNPAGE_INSTFILES
+!insertmacro MUI_LANGUAGE "SimpChinese"
+!insertmacro MUI_LANGUAGE "English"
+
+Section "主程序" SecMain
+  SetOutPath "$INSTDIR"
+  File /r "${bundleDir.replace(/\\/g, '/')}/*.*"
+
+  WriteRegStr HKCU "Software\md2docx" "InstallDir" "$INSTDIR"
+  WriteUninstaller "$INSTDIR\卸载 md2docx.exe"
+  CreateDirectory "$SMPROGRAMS\md2docx"
+  CreateShortcut "$SMPROGRAMS\md2docx\启动 md2docx.lnk" "$INSTDIR\启动 md2docx.cmd" "" "$INSTDIR\node.exe" 0
+  CreateShortcut "$SMPROGRAMS\md2docx\卸载 md2docx.lnk" "$INSTDIR\卸载 md2docx.exe"
+  CreateShortcut "$DESKTOP\md2docx.lnk" "$INSTDIR\启动 md2docx.cmd" "" "$INSTDIR\node.exe" 0
+SectionEnd
+
+Section "Uninstall"
+  Delete "$DESKTOP\md2docx.lnk"
+  RMDir /r "$SMPROGRAMS\md2docx"
+  DeleteRegKey HKCU "Software\md2docx"
+  ; 作业数据（用户上传与产物）一并清理
+  RMDir /r "$INSTDIR"
+SectionEnd
+`;
+  const nsiPath = path.join(TEMP, 'md2docx.nsi');
+  fs.writeFileSync(nsiPath, nsi, 'utf8');
+
+  const env = { ...process.env };
+  if (nsis.dir) env.NSISDIR = nsis.dir;
+  try {
+    execFileSync(nsis.bin, ['-V2', nsiPath], { stdio: ['ignore', 'pipe', 'pipe'], env, timeout: 3600000 });
+  } catch (e) {
+    const msg = (e.stderr || e.stdout || '').toString().trim().split('\n').slice(-3).join(' | ');
+    log(`  安装器编译失败: ${msg || e.message}`);
+    return null;
+  }
+  if (!fs.existsSync(outExe)) { log('  安装器未产出'); return null; }
+  return { path: outExe, size: fs.statSync(outExe).size };
+}
 
   if (!KEEP_TEMP) fs.rmSync(TEMP, { recursive: true, force: true });
   else log(`  临时目录保留: ${TEMP}`);
