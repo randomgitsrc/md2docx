@@ -583,6 +583,7 @@ RequestExecutionLevel user
 !define MUI_ABORTWARNING
 !insertmacro MUI_PAGE_DIRECTORY
 !insertmacro MUI_PAGE_INSTFILES
+!define MUI_UNCONFIRMWARNING "将删除 md2docx 程序及其作业数据（含已转换但未取走的文档）。此操作不可撤销。"
 !insertmacro MUI_UNPAGE_CONFIRM
 !insertmacro MUI_UNPAGE_INSTFILES
 !insertmacro MUI_LANGUAGE "SimpChinese"
@@ -604,7 +605,12 @@ Section "Uninstall"
   Delete "$DESKTOP\md2docx.lnk"
   RMDir /r "$SMPROGRAMS\md2docx"
   DeleteRegKey HKCU "Software\md2docx"
-  ; 作业数据（用户上传与产物）一并清理
+
+  ; 作业数据（用户上传与产物）一并清理。
+  ; 注意要删两处：数据目录默认在 $INSTDIR\data，但当安装目录不可写时
+  ; 会回退到 $LOCALAPPDATA\md2docx（见 server/config.js resolveDataDir）。
+  ; 只删 $INSTDIR 会留下回退目录，与"删除即完全卸载"的承诺不符。
+  RMDir /r "$LOCALAPPDATA\md2docx"
   RMDir /r "$INSTDIR"
 SectionEnd
 `;
