@@ -80,6 +80,18 @@ md2docx 转换时，mermaid 与 PlantUML 图表**默认注入灰阶/黑白主题
 11. **外部命令必须用参数数组、不经 shell**（跨平台硬规则）：一律走 `scripts/exec-util.js` 的 `runFile`/`runMmdc`（内部 `execFileSync` + 数组），**禁止**再用模板字符串拼命令行。原因：路径含空格或中文（`C:\Program Files\…`、`D:\项目 (2026)\…`、`C:\Users\张三\…`）时字符串拼命令会被 shell 拆开参数——历史 bug 就是固定 `-i/-o` 加了引号、而 `-p` 漏了引号，导致**路径含空格时 mermaid 静默降级为代码块**（报 `error: too many arguments`）。另外 Windows 下 `node_modules/.bin/mmdc` 是 `.cmd` shim，不能当可执行文件直调，故统一用 `node <mermaid-cli>/src/cli.js`；Electron 打包后 `process.execPath` 是 Electron 本体，需 `ELECTRON_RUN_AS_NODE=1` 才以 Node 模式运行（`runMmdc` 已处理）。
 12. **渲染产物必须「先删旧文件 + 以产物判成功」**：PlantUML 在「块内无 `@startuml`」等情况下的行为是 **exit code 0 且不写任何文件**（stderr 仅 `No diagram found`）。若复用固定产物名（`p_<index>.png`）且只靠 `fs.existsSync` 判成功，就会把**上一份文档的 PNG** 当成本次结果——实测 docA 正常、docB 的 plantuml 块写错，结果 docB 嵌入了 docA 的图（md5 相同）且日志报「1/1 成功」，**静默产出内容错误的文档**。因此：渲染前 `fs.rmSync(outFile)`，成功判定**必须看产物**而非退出码。mermaid 侧因文件名含 `baseName` 且失败会抛异常，暂无此问题，但改动时同样遵守此规则。回归：先转正常文档再转「无 @startuml」文档，后者必须降级为代码块。
 13. **必须剥离 BOM，否则 YAML 去重保险失效**：Windows 记事本「UTF-8」另存会写 BOM，行首 U+FEFF 使 `fixYamlFrontMatter` 的去重前置判断 `^---\n` 不匹配 → 去重被**静默跳过** → 随后 gray-matter 对重复 `title` 报 `duplicated mapping key` 直接失败。实测同一内容无 BOM 正常、带 BOM 报错。preprocess 与 md2docx 读取后都必须 `.replace(/^\uFEFF/, '')`（与 CRLF 归一化并列执行）。
+14. **core 后端的语法错误不会抛异常，而是渲染成"错误图"**：`@plantuml/core` 对语法错误
+    **不报错**，而是把错误提示（`Syntax Error?` / `Diagram not supported by this release` /
+    `is not recognized` / `Sorry, but` / `Suggested actions:`）连同源码回显**画成一张 SVG 返回**。
+    若不拦截，用户会拿到"图里写着语法错误"的正式文档，而日志却报「渲染成功」——比降级为代码块
+    更糟。已由 `plantuml-core-helper.js` 的特征检测拦住，并把错误格式对齐成
+    `Error line N in file:`（使上层行号换算逻辑无需改动）。
+    **排查提示**：core 比 jar 更宽容（如 `sjwz --> GMS-DM-BWJC` 中带连字符的名称，core 视作
+    完整节点名可正常渲染，jar 会报错），故两后端对同一图可能一成一败；改后端时须重跑 23 图比对。
+15. **PlantUML 截图倍率必须为 1**：横置判定用**绝对像素**（`宽/CONTENT_WIDTH_PX > 3` 且
+    `宽高比 > 2.0`），该阈值按 jar 版原生输出尺寸校准。core 后端若用 scale=2，像素翻倍会让
+    擦线图被误判为横置 → 改变分节与页码。scale=1 时 core 与 jar 尺寸基本一致
+    （实测 177x206 vs 175x205）。
 
 ## 工作流程：计划 → 评审 → 实施
 
@@ -115,8 +127,11 @@ md2docx 转换时，mermaid 与 PlantUML 图表**默认注入灰阶/黑白主题
 2. 用 Word/LibreOffice 打开检查：章节编号、题注位置、表格跨页、横置大图、页码连续性（竖→横→竖）。
 3. 图表验证：检查 `md/output/.mermaid/`、`.plantuml/` 的 PNG 为黑白灰风格（无彩色）；用户显式配置主题的图保留彩色。
 4. 外部依赖（已大幅收敛，两平台一致）：
-   - **必需**：`node`；`chrome`（Chrome/Chromium/Edge 任一，`puppeteer-config.js` 自动探测）；`plantuml`（PATH 中的 `plantuml`、`bin/` 下的原生 exe、或 `bin/plantuml.jar` 任一）。
-   - **可选**：`java` 仅在 PlantUML 走 jar 方式时需要（用官方 native exe 则免）；`graphviz` 可被 PlantUML 内置 Smetana 布局替代。
+   - **必需**：`node`；`chrome`（Chrome/Chromium/Edge 任一，`puppeteer-config.js` 自动探测）。
+     PlantUML 走 **core 后端**时无需任何额外运行时（纯 npm 依赖 + 复用同一浏览器）。
+   - **PlantUML 后端**：`PLANTUML_BACKEND=core|jar|auto`（默认 auto）。
+     `core` = `@plantuml/core`（TeaVM 版，自带 WASM 版真 Graphviz）——**免 Java、免 graphviz**；
+     `jar` = `java -jar plantuml.jar`（需 `java`，`graphviz` 可选/可被 Smetana 替代）。
    - **已移除**：`python3` + `python-docx`——分页属性改由 docx 库原生输出（见「已知陷阱」第 4 条）。
    - 缺依赖时图表降级为代码块，不报致命错误。`/api/health` 的 `status` 只看必需项。
 5. mmdc 统一走 `exec-util.runMmdc()`（`node <mermaid-cli>/src/cli.js` + 参数数组，不经 shell，也不走 `npx`）——不要改回 `npx mmdc` 或模板字符串拼命令，原因见「已知陷阱」第 11 条。
