@@ -1465,7 +1465,25 @@ async function convert(cleanPath, opts = {}) {
     inputDir, srcDir, listPoolSize,
     imageRoot: opts.imageRoot || null,
   });
-  const converterSections = converter.convert(content);
+  // 临时目录归属：只有本函数自己创建时才负责清理。
+  // 外部传入 tmpDir（如复用同一目录做多篇转换）时归调用方管理。
+  // 不清理会持续泄漏——实测本机曾积累 288 个 /tmp/md2docx-*。
+  const ownsTmpDir = !opts.tmpDir;
+  const cleanupTmpDir = () => {
+    if (!ownsTmpDir) return;
+    try { fs.rmSync(converter.tmpDir, { recursive: true, force: true }); }
+    catch (_) { /* 清理失败不影响产物 */ }
+  };
+  // 图片（mermaid / plantuml / 作者自带）都在 convert() 阶段读入内存
+  // （renderMermaid / renderPlantUML 返回 buffer），之后不再需要临时目录。
+  // 因此用 try/finally 包住这一句：**成功与抛错都清理**，
+  // 否则失败路径会持续泄漏（实测本机曾积累 288 个 /tmp/md2docx-*）。
+  let converterSections;
+  try {
+    converterSections = converter.convert(content);
+  } finally {
+    cleanupTmpDir();
+  }
   if (opts.onProgress) opts.onProgress(70, '解析并转换正文');
   report.log(`[md2docx] 正文段落/元素数: ${converterSections.reduce((sum, sec) => sum + sec.children.length, 0)}`);
   report.log(`[md2docx] 嵌入图片: ${converter.imageIndex} 个`);
