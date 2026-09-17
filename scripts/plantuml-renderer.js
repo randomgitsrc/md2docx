@@ -338,53 +338,86 @@ function buildRenderError(e, code, injectedLineOffset = 0) {
 }
 
 // =========================================================================
-// 6. 渲染 PlantUML 源码 → PNG
+// 6. 渲染后端选择
+// =========================================================================
+// - core：@plantuml/core（TeaVM 版，免 Java / 免 graphviz，纯 npm 依赖）
+// - jar ：java -jar plantuml.jar（原有方式，需 Java + graphviz）
+// 环境变量 PLANTUML_BACKEND=core|jar 可强制指定；默认 auto（优先 core，不可用则 jar）。
+function resolveBackend(puml) {
+  const want = (process.env.PLANTUML_BACKEND || 'auto').toLowerCase();
+  if (want === 'jar') return 'jar';
+  if (want === 'core') return 'core';
+
+  // auto：core 可用就用 core（离线包与 Windows 场景下更省事）
+  try {
+    const { isCoreAvailable } = require('./plantuml-core-renderer');
+    if (isCoreAvailable()) return 'core';
+  } catch (_) { /* 未安装则回退 */ }
+  return puml ? 'jar' : 'core';
+}
+
+// =========================================================================
+// 7. 渲染 PlantUML 源码 → PNG
 // =========================================================================
 
 function renderPlantUML(code, tmpDir, index) {
-  // 0. 检测 Graphviz
-  checkGraphviz();
-
-  // 1. 确保有可用的 plantuml
-  let puml = findPlantUML();
-  if (!puml) {
-    downloadPlantUML();
-    puml = findPlantUML();
-    if (!puml) throw new Error('plantuml 不可用，且自动下载失败');
-  }
-
-  // 2. 注入简洁主题 + 中文字体 + 写源文件（保留源文件便于调试）
-  // 2. 自动补全缺失的结束标记（常见：有 @startuml 无 @enduml）
+  // 自动补全缺失的结束标记（常见：有 @startuml 无 @enduml）
   const closed = ensureEndMarker(code);
   if (closed.fixed) {
     console.warn(`[plantuml] 图${index}: 缺少结束标记 ${closed.fixed}，已自动补全`);
   }
   const baseCode = closed.code;
 
+  const puml = findPlantUML();
+  const backend = resolveBackend(puml);
+
+  // jar 后端才需要 graphviz（core 自带 WASM 版 Graphviz）
+  if (backend === 'jar') {
+    checkGraphviz();
+    if (!puml) {
+      downloadPlantUML();
+      if (!findPlantUML()) throw new Error('plantuml 不可用，且自动下载失败');
+    }
+  }
+
   const inFile  = path.join(tmpDir, `p_${index}.puml`);
   const outFile = path.join(tmpDir, `p_${index}.png`);
-  const codeWithFont = injectChineseFont(injectTheme(baseCode));
-
-  // 【关键】渲染前必须删掉可能存在的同名旧产物。
-  // 缓存目录是持久的，而 PlantUML 在"块内无 @startuml"等情况下的行为是
-  // **exit code 0 且不写任何文件**（stderr 仅提示 No diagram found）。
-  // 若不先删旧文件，下面靠 fs.existsSync(outFile) 判断成功就会把
-  // **上一份文档的 PNG** 当成本次结果，静默产出内容错误的文档。
-  fs.rmSync(outFile, { force: true });
-  fs.writeFileSync(inFile, codeWithFont, 'utf8');
-
-  // 3. 执行渲染
-  const { cmd, args } = buildCommand(puml, inFile, tmpDir);
-  const run = () => runFile(cmd, args, { timeout: 30000 });
   let renderStderr = '';
+
+  // 渲染一段代码（两后端统一入口）：成功则以产物为准
+  const renderWith = (srcCode) => {
+    const codeWithFont = injectChineseFont(injectTheme(srcCode));
+    // 【关键】渲染前必须删掉可能存在的同名旧产物。
+    // 缓存目录是持久的，而 PlantUML 在"块内无 @startuml"等情况下的行为是
+    // **exit code 0 且不写任何文件**（stderr 仅提示 No diagram found）。
+    // 若不先删旧文件，靠 fs.existsSync(outFile) 判断成功就会把
+    // **上一份文档的 PNG** 当成本次结果，静默产出内容错误的文档。
+    fs.rmSync(outFile, { force: true });
+    fs.writeFileSync(inFile, codeWithFont, 'utf8');
+
+    if (backend === 'core') {
+      const { renderPlantUMLCore } = require('./plantuml-core-renderer');
+      renderPlantUMLCore(codeWithFont, tmpDir, index);
+    } else {
+      const { cmd, args } = buildCommand(findPlantUML(), inFile, tmpDir);
+      const res = runFile(cmd, args, { timeout: 30000 });
+      if (res.stdout) renderStderr = res.stdout;
+    }
+    // 不能只看退出码：PlantUML 可能 exit 0 却不写文件
+    if (!fs.existsSync(outFile)) {
+      throw new Error(`渲染未产出图像${renderStderr ? `: ${renderStderr.split('\n')[0]}` : ''}`);
+    }
+    return codeWithFont;
+  };
+
   let rendered = false;
+  let firstError = null;
   try {
-    const res = run();
-    if (res.stdout) renderStderr = res.stdout;
-    // 不能只看退出码：PlantUML 失败时也可能返回 0，必须以产物为准
-    rendered = fs.existsSync(outFile);
+    renderWith(baseCode);
+    rendered = true;
   } catch (e) {
-    // 渲染失败：依次尝试已知的自动修复（均基于原始代码，再注入字体）。
+    firstError = e;
+    // 渲染失败：依次尝试已知的自动修复（均基于原始代码，再注入主题字体）。
     // 只在失败后作为补救，成功才采用，因此不会影响本来正常的图。
     const candidates = [
       { label: '多 else 语法', code: fixMultiElse(baseCode) },
@@ -393,55 +426,43 @@ function renderPlantUML(code, tmpDir, index) {
     let lastFailure = null;
     for (const c of candidates) {
       if (!c.code) continue;
-      const fixedWithFont = injectChineseFont(injectTheme(c.code));
-      fs.rmSync(outFile, { force: true });   // 同样先清旧产物
-      fs.writeFileSync(inFile, fixedWithFont, 'utf8');
       try {
-        run();
-        // 仍以产物为准（PlantUML 可能 exit 0 却不写文件）
-        if (fs.existsSync(outFile)) {
-          console.warn(`[plantuml] 图${index}: 自动修复（${c.label}）后渲染成功`);
-          rendered = true;
-          break;
-        }
-        lastFailure = {
-          err: new Error(`自动修复（${c.label}）后仍未产出图像`),
-          code: c.code,
-          offset: fixedWithFont.split('\n').length - c.code.split('\n').length,
-        };
+        const used = renderWith(c.code);
+        console.warn(`[plantuml] 图${index}: 自动修复（${c.label}）后渲染成功`);
+        rendered = true;
+        break;
       } catch (e2) {
         lastFailure = {
           err: e2,
           code: c.code,
-          offset: fixedWithFont.split('\n').length - c.code.split('\n').length,
+          offset: injectChineseFont(injectTheme(c.code)).split('\n').length - c.code.split('\n').length,
         };
       }
     }
     if (!rendered) {
       if (lastFailure) throw buildRenderError(lastFailure.err, lastFailure.code, lastFailure.offset);
-      throw buildRenderError(e, baseCode, codeWithFont.split('\n').length - baseCode.split('\n').length);
+      throw buildRenderError(e, baseCode, injectChineseFont(injectTheme(baseCode)).split('\n').length - baseCode.split('\n').length);
     }
   }
 
   if (!fs.existsSync(outFile)) {
-    // 未产出文件：给出可操作原因（PlantUML 常在 stderr 提示 No diagram found）
     const hint = /no diagram found|no image/i.test(renderStderr)
       ? '未找到完整图，通常是块内缺少 @enduml 等结束标记'
       : 'PlantUML 未生成图像（请检查图语法是否完整）';
     throw new Error(`plantuml 渲染无输出: ${outFile} — ${hint}`);
   }
 
-  // 4. 读取 PNG 尺寸
+  // 读取 PNG 尺寸
   const buffer = fs.readFileSync(outFile);
   const width  = buffer.readUInt32BE(16);
   const height = buffer.readUInt32BE(20);
 
-  // 5. 横置判断：基于渲染后图片实际尺寸（统一与 appendImageParagraph 一致）
+  // 横置判断：基于渲染后图片实际尺寸（统一与 appendImageParagraph 一致）
   const downscaleRatio = width / CONTENT_WIDTH_PX;
   const aspectRatio = width / height;
   const needsLandscape = downscaleRatio > 3 && aspectRatio > 2.0;
 
-  return { buffer, width, height, needsLandscape };
+  return { buffer, width, height, needsLandscape, backend };
 }
 
 module.exports = { findPlantUML, downloadPlantUML, buildCommand, renderPlantUML };

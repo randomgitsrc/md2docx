@@ -15,6 +15,7 @@
   "type": "commonjs",
   "dependencies": {
     "@mermaid-js/mermaid-cli": "^11.15.0",
+    "@plantuml/core": "^1.2026.8",
     "adm-zip": "^0.5.17",
     "docx": "^9.7.0",
     "express": "^4.22.2",
