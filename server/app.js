@@ -137,11 +137,14 @@ if (require.main === module) {
       const url = `http://${config.host === '0.0.0.0' ? 'localhost' : config.host}:${actual}/`;
       logger.info(`md2docx HTTP 服务已启动: ${url}`);
       logger.info(`  作业目录: ${config.jobsDir}（并发上限 ${config.maxConcurrent}）`);
-      // 供启动脚本/桌面端读取实际端口（避免硬编码 8080 打不开）
+      // 供启动脚本/桌面端读取实际端口（避免硬编码 8080 打不开）。
+      // 失败不致命，但必须留痕——静默吞错会让"启动脚本读不到地址"难以排查。
       try {
         fs.mkdirSync(config.dataDir, { recursive: true });
         fs.writeFileSync(path.join(config.dataDir, 'server-url.txt'), url, 'utf8');
-      } catch (_) { /* 非致命 */ }
+      } catch (e) {
+        logger.warn(`[app] 写入 server-url.txt 失败（不影响服务）: ${e.message}`);
+      }
       // 启动时探测依赖（预热缓存，M5）
       deps.probe();
       // 自动打开浏览器（离线一键启动时用；设 NO_OPEN_BROWSER=1 可关闭）

@@ -42,12 +42,28 @@ class DependencyCheck {
 
 
   _plantuml() {
-    // PlantUML 可以来自：PATH 中的 plantuml、bin/ 下的原生 exe、或 bin/plantuml.jar（需 Java）
+    // PlantUML 有三个来源，按实际生效的后端报告（不能只看 jar）：
+    //   1. core 后端 —— @plantuml/core（纯 npm 依赖，免 Java/graphviz）
+    //   2. PATH 中的 plantuml / bin 下的原生 exe
+    //   3. bin/plantuml.jar（需 Java）
+    const coreAvailable = () => {
+      try { return require('../../scripts/plantuml-core-renderer').isCoreAvailable(); }
+      catch (_) { return false; }
+    };
     try {
-      const { findPlantUML } = require('../../scripts/plantuml-renderer');
-      const p = findPlantUML();
-      if (!p) return { ok: false, error: 'not found' };
-      return { ok: true, version: p.type === 'command' ? 'native/command' : 'jar (needs java)' };
+      // 与 renderPlantUML 的后端选择保持一致
+      let backend = (process.env.PLANTUML_BACKEND || 'auto').toLowerCase();
+      if (backend !== 'core' && backend !== 'jar') {
+        backend = coreAvailable() ? 'core' : 'jar';
+      }
+      if (backend === 'core') {
+        return coreAvailable()
+          ? { ok: true, version: 'core（免 Java/graphviz）' }
+          : { ok: false, error: '@plantuml/core 不可用' };
+      }
+      const puml = require('../../scripts/plantuml-renderer').findPlantUML();
+      if (!puml) return { ok: false, error: 'not found（既无 @plantuml/core 也无 jar）' };
+      return { ok: true, version: puml.type === 'command' ? 'native/command' : 'jar (needs java)' };
     } catch (e) {
       return { ok: false, error: e.message };
     }
@@ -56,20 +72,24 @@ class DependencyCheck {
   probe() {
     // 依赖清单说明：
     //   node    —— 必需（运行时）
-    //   chrome  —— mermaid 渲染必需（Chrome/Chromium/Edge 任一）
-    //   plantuml—— PlantUML 渲染必需（原生 exe 或 jar 任一）
-    //   java    —— 仅当 PlantUML 走 jar 方式时需要
-    //   graphviz—— 可选；PlantUML 内置 Smetana 布局可替代（见 !pragma layout smetana）
+    //   chrome  —— 渲染必需（Chrome/Chromium/Edge 任一；mermaid 与 core 后端都用它）
+    //   plantuml—— PlantUML 渲染必需（@plantuml/core / 原生 exe / jar 任一）
+    //   java    —— 仅当 PlantUML 走 jar 方式时需要（core 后端不需要）
+    //   graphviz—— 仅 jar 方式可能用到（core 自带 WASM 版 Graphviz）
     // 注意：python-docx 已不再是依赖（分页属性改由 docx 库原生输出）。
+    const plantuml = this._plantuml();
     const result = {
       node: { ok: true, version: process.version },
       chrome: this._findChrome(),
-      plantuml: this._plantuml(),
+      plantuml,
       java: run('java', '-version 2>&1'),
       graphviz: run('dot', '-V 2>&1'),
     };
+    // 后端信息作为 result 的附加字段（不是依赖项，日志/汇总时须排除）
+    result.plantumlBackend = /core/.test(String(plantuml.version || '')) ? 'core' : 'jar';
     // 必需项：node / chrome / plantuml
     result.allOk = ['node', 'chrome', 'plantuml'].every(k => result[k].ok);
+    result.requiredKeys = ['node', 'chrome', 'plantuml'];
     this.cache = result;
     this.cachedAt = Date.now();
     return result;
@@ -79,12 +99,14 @@ class DependencyCheck {
   get() {
     if (!this.cache || Date.now() - this.cachedAt > this.ttlMs) {
       const r = this.probe();
-      // 只打印各项依赖；allOk 是布尔汇总，不能按 v.ok 取值（否则永远显示 ✗）
+      // 只打印真正的依赖项：allOk 是布尔汇总、requiredKeys 是数组、plantumlBackend 是字符串，
+      // 它们都没有 .ok 字段，混进来会一律显示 ✗（此坑已犯过一次）。
+      const skip = new Set(['allOk', 'requiredKeys', 'plantumlBackend']);
       const detail = Object.entries(r)
-        .filter(([k]) => k !== 'allOk')
+        .filter(([k]) => !skip.has(k))
         .map(([k, v]) => `${k}=${v.ok ? '✓' : '✗'}`)
         .join(' ');
-      logger.info(`[deps] 依赖探测完成: ${detail} | allOk=${r.allOk ? '✓' : '✗'}`);
+      logger.info(`[deps] 依赖探测完成: ${detail} | 后端=${r.plantumlBackend} | allOk=${r.allOk ? '✓' : '✗'}`);
       return r;
     }
     return this.cache;

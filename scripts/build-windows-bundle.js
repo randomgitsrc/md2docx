@@ -93,6 +93,20 @@ function dirStats(dir) {
 
 function human(bytes) { return `${(bytes / 1048576).toFixed(1)}MB`; }
 
+/**
+ * 构建戳：写入包内，便于区分包的新旧。
+ * 起因：曾用旧包排查新代码的 bug，白费一轮——包里带的是构建时的代码快照。
+ */
+function buildStamp() {
+  let git = 'nogit';
+  try {
+    git = execFileSync('git', ['rev-parse', '--short', 'HEAD'], { cwd: ROOT, encoding: 'utf8' }).trim();
+    const dirty = execFileSync('git', ['status', '--porcelain'], { cwd: ROOT, encoding: 'utf8' }).trim();
+    if (dirty) git += '-dirty';
+  } catch (_) { /* 非 git 环境 */ }
+  return { git, time: new Date().toISOString() };
+}
+
 async function main() {
   log(`输出目录: ${OUT_DIR}`);
   fs.mkdirSync(TEMP, { recursive: true });
@@ -291,6 +305,18 @@ async function main() {
     `构建信息：Node ${nodeVer}${chromeDir ? ' / 内置 chrome-headless-shell' : ' / 使用系统 Chrome 或 Edge'}`,
   ].join('\r\n') + '\r\n', 'utf8');
 
+  // 构建戳（便于确认目标机上的包是哪次构建的）
+  const stamp = buildStamp();
+  fs.writeFileSync(path.join(BUNDLE_DIR, 'BUILD-INFO.txt'), [
+    `构建时间: ${stamp.time}`,
+    `代码版本: ${stamp.git}`,
+    `Node: ${nodeVer}`,
+    `浏览器: ${chromeDir ? '内置 chrome-headless-shell' : '未内置（用系统 Chrome/Edge）'}`,
+    `PlantUML: @plantuml/core（core 后端，免 Java/graphviz）`,
+    '',
+    '注：本目录代码是构建时的快照；改了源码需重新运行 build-windows-bundle.js。',
+  ].join('\r\n') + '\r\n', 'utf8');
+
   // ---------------------------------------------------------------- 6. 打包 zip
   log('步骤 6/6：打包 zip');
   const AdmZip = require(path.join(ROOT, 'node_modules', 'adm-zip'));
@@ -314,6 +340,7 @@ async function main() {
   log('=== 完成 ===');
   log(`  目录: ${BUNDLE_DIR}  (${human(stats.bytes)}, ${stats.files} 个文件)`);
   log(`  压缩: ${zipPath}  (${human(zipSize)})`);
+  log(`  代码版本: ${stamp.git} @ ${stamp.time}`);
   log(`  目标机：解压 → 双击「启动 md2docx.cmd」→ 浏览器自动打开`);
 
   if (!KEEP_TEMP) fs.rmSync(TEMP, { recursive: true, force: true });
