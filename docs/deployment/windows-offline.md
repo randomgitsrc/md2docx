@@ -16,8 +16,24 @@
 
 | 文件 | 说明 |
 |---|---|
-| `md2docx-win-x64.zip` | **分发用**（实测约 213MB） |
-| `md2docx-win-x64/` | 未压缩目录（也可直接拷目录） |
+| `md2docx-Setup-<ver>-win-x64.exe` | **一键安装器**（实测约 133MB；体积最小、体验最好） |
+| `md2docx-win-x64.zip` | 免安装压缩包（实测约 213MB） |
+| `md2docx-win-x64/` | 未压缩目录（可直接拷目录） |
+
+### 2.1 一键安装器（推荐）
+
+双击 `md2docx-Setup-<ver>-win-x64.exe` 安装。特点是：
+
+- **按用户安装**到 `%LOCALAPPDATA%\Programs\md2docx`，`RequestExecutionLevel user`
+  → **无需管理员、不弹 UAC**
+- 自动创建开始菜单与桌面快捷方式（指向"启动 md2docx.cmd"）
+- 卸载走"设置 → 应用"或开始菜单里的卸载项，会清理快捷方式、注册表项与整个安装目录
+
+安装器由构建脚本用 **NSIS 交叉编译**生成（在 Linux 上即可，无需 Windows 机器）。
+
+### 2.2 免安装包
+
+解压 `md2docx-win-x64.zip`，双击其中的 `启动 md2docx.cmd` 即可（见第 3 节）。
 
 包内结构：
 
@@ -59,9 +75,13 @@ node scripts/build-windows-bundle.js
 
 | 参数 | 作用 |
 |---|---|
+| `--installer` | 额外生成 Windows 一键安装器 EXE（NSIS，可交叉编译） |
 | `--out <dir>` | 指定输出目录（默认 `dist/`） |
 | `--skip-chromium` | 不打包浏览器（目标机需自带 Chrome/Edge，可省约 230MB） |
 | `--keep-temp` | 保留临时目录便于排查 |
+
+生成安装器时，若 `PATH` 中没有 `makensis`，脚本会自动下载并**本地解包**
+Ubuntu 归档的 `nsis` + `nsis-common` 两个 deb（不改系统、不需 root）。
 
 构建脚本会自动完成：下载便携 Node → `npm ci --os=win32 --cpu=x64` → 裁剪冗余
 （source map / 类型声明 / Chrome 多余语言包 / 非 win32 原生包）→ 下载
@@ -74,8 +94,9 @@ node scripts/build-windows-bundle.js
 | `chrome-headless-shell` | 231MB |
 | `node_modules`（裁剪后） | 297MB |
 | `node.exe` | 83MB |
-| **目录合计** | **534.8MB** |
+| **目录合计** | **534.9MB** |
 | **zip** | **213.3MB** |
+| **一键安装器 EXE** | **133.0MB**（LZMA 固实压缩，比 zip 更小） |
 
 想更小：加 `--skip-chromium` 复用系统 Chrome/Edge（约省 230MB）。
 

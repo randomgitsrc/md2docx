@@ -8,8 +8,8 @@ bin/plantuml.jar
 md/output/
 md/**/output/
 
-# HTTP 服务作业工作目录（运行时生成，勿提交）
-data/jobs/
+# HTTP 服务运行时数据目录（作业目录、server-url.txt 等，运行时生成，勿提交）
+data/
 
 # 离线分发包构建产物（由 scripts/build-windows-bundle.js 生成，体积数百 MB，勿提交）
 dist/

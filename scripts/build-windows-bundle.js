@@ -23,6 +23,7 @@ const path = require('path');
 const os = require('os');
 const { execFileSync } = require('child_process');
 const https = require('https');
+const http = require('http');
 
 const ROOT = path.resolve(__dirname, '..');
 const args = process.argv.slice(2);
@@ -46,7 +47,10 @@ function fail(msg) { console.error(`[bundle] 错误: ${msg}`); process.exit(1); 
 function download(url, dest) {
   return new Promise((resolve, reject) => {
     const go = (u, n) => {
-      https.get(u, { timeout: 300000 }, (res) => {
+      // 按协议选模块：Ubuntu 归档的 .deb 是 http 地址，
+      // 之前只用 https 会报 'Protocol "http:" not supported'。
+      const mod = u.startsWith('http:') ? http : https;
+      mod.get(u, { timeout: 300000 }, (res) => {
         if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
           res.resume();
           if (n <= 0) return reject(new Error('重定向过多'));
@@ -361,15 +365,25 @@ async function ensureMakensis() {
   } catch (_) { /* 继续 */ }
 
   // 2) 本地解包（Ubuntu 归档的 nsis + nsis-common 两个 deb）
-  const base = process.env.NSIS_DEB_BASE
-    || 'http://archive.ubuntu.com/ubuntu/pool/universe/n/nsis';
+  // 优先 https；部分镜像只提供 http，download() 已支持两种协议
+  const bases = process.env.NSIS_DEB_BASE
+    ? [process.env.NSIS_DEB_BASE]
+    : ['https://archive.ubuntu.com/ubuntu/pool/universe/n/nsis',
+       'http://archive.ubuntu.com/ubuntu/pool/universe/n/nsis'];
   const nsisDeb = path.join(TEMP, 'nsis.deb');
   const commonDeb = path.join(TEMP, 'nsis-common.deb');
-  try {
-    await download(`${base}/nsis_3.09-4ubuntu1_amd64.deb`, nsisDeb);
-    await download(`${base}/nsis-common_3.09-4ubuntu1_all.deb`, commonDeb);
-  } catch (e) {
-    log(`  未能下载 NSIS（${e.message}）→ 跳过安装器生成`);
+  let fetched = false;
+  let lastErr = null;
+  for (const base of bases) {
+    try {
+      await download(`${base}/nsis_3.09-4ubuntu1_amd64.deb`, nsisDeb);
+      await download(`${base}/nsis-common_3.09-4ubuntu1_all.deb`, commonDeb);
+      fetched = true;
+      break;
+    } catch (e) { lastErr = e; }
+  }
+  if (!fetched) {
+    log(`  未能下载 NSIS（${lastErr && lastErr.message}）→ 跳过安装器生成`);
     return null;
   }
   const root = path.join(TEMP, 'nsis-root');
