@@ -1012,21 +1012,81 @@ class Md2DocxConverter {
       colWeights.push(maxDataW);
     }
 
-    // 列宽：按内容权重等比分配，设下限并保证每列 >= 1 DXA。
-    // 陷阱：列数很多时（宽表，如 33 列的位域图），固定 8% 下限的
-    // 总和会超过页面总宽，若把差值一次性加到单列上会把该列压成负数，
-    // docx 随即抛 "Invalid value '-N' specified. Must be a positive integer."
-    // 因此下限取 min(8%, 总宽/列数)，并把舍入差逐列 ±1 分摊。
-    const totalWeight = colWeights.reduce((a, b) => a + b, 0) || 1;
-    const minColWidth = Math.max(
-      1,
-      Math.min(Math.floor(CONTENT_WIDTH * 0.08), Math.floor(CONTENT_WIDTH / colCount))
-    );
-    const columnWidths = colWeights.map(w => {
-      const cw = Math.floor(CONTENT_WIDTH * w / totalWeight);
-      return Math.max(cw, minColWidth, 1);
-    });
-    // 修正舍入误差：逐列 ±1，任何情况下不产生 <= 0 的列宽
+    // 列宽分配：内容感知（content-aware）。
+    //
+    // 背景：原先只用「按内容权重等比分配 + 固定 8% 下限」。当同一张表里既有
+    // 极短列（键值表的「需求名称」4 字）又有极长列（「处理过程」数百字）时，
+    // 权重比可达 32×，短列被压到不足一个字宽 → 文字**逐字竖排**。
+    // 更糟的是 8% 下限会被随后的「差值修正」循环逐列 -1 抹掉（该循环本意只是
+    // 抹平舍入误差），下限形同虚设（实测下限 707 → 实际 509）。
+    //
+    // 现在改为三层：
+    //   1) 每列算「自然宽度」= min(该列最长内容, 可读上限)，作为**不可压下限**。
+    //      内容短的列（标签列）因此保住完整词宽，不再逐字换行；内容长的列只保
+    //      一个适度地板（反正要折行，给多了是浪费）。
+    //   2) **迭代钉下限**：先按权重分比例份额，凡份额低于自己下限的列钉在下限，
+    //      剩余宽度只在未钉住的列之间重新按比例分，重复至无新列触底。这样短列
+    //      刚好拿到"够写一个词"的宽度而不过度占用，长列分走真正的剩余空间。
+    //   3) 舍入修正**只从高于下限的列回收**，触底列不再被削——修掉吞下限的 bug。
+    //
+    // 陷阱保护（沿用，不可破）：列数极多时（如 33 位列宽表）若下限总和已超页宽，
+    // 按比例整体压缩下限，且每列始终 >= 1 DXA——避免出现负列宽使 docx 抛
+    // "Invalid value '-N' specified. Must be a positive integer."（整篇转换失败）。
+    const TABLE_HALF_UNIT_DXA = SIZE.五号 * 5;  // 表格五号字：半角 105 DXA / 全角 210 DXA
+    const CELL_PADDING_DXA = 200;               // 左右内边距各 100，与 buildCell 的 margins 一致
+    const READABLE_CAP_UNITS = 16;              // 可读上限 16 单位 = 8 个中文字（权重单位：中文=2）
+    // 安全余量：中文全角字宽理论值 = 字号（210 DXA），但字体实际 advance 可能略大，
+    // 且列宽会被 Word 内部舍入。若下限精确等于"4 字 × 210"，标签会卡在换行边界上，
+    // 稍有偏差就退化成 3 字 + 换行。乘 1.08 留出约 1/3 字宽的余量，稳妥不换行。
+    const WIDTH_SAFETY = 1.08;
+
+    const naturalWidths = colWeights.map(w =>
+      Math.round(Math.min(w, READABLE_CAP_UNITS) * TABLE_HALF_UNIT_DXA * WIDTH_SAFETY) + CELL_PADDING_DXA);
+
+    let sumNatural = naturalWidths.reduce((a, b) => a + b, 0);
+    let floors = naturalWidths;
+    if (sumNatural > CONTENT_WIDTH) {
+      // 下限总和已超页宽（宽表）：整体等比压缩，保证每列 >= 1
+      floors = naturalWidths.map(w => Math.max(1, Math.floor(w * CONTENT_WIDTH / sumNatural)));
+    }
+
+    // 迭代钉下限：先按权重拿比例份额，凡低于自己下限的列「钉」在下限，
+    // 剩余宽度只在未钉住的列之间重新按比例分配，直到没有新的列触底。
+    // 这样短列刚好拿到"够写一个词"的宽度而不多占，长列分走真正的剩余空间。
+    const pinned = new Array(colCount).fill(false);
+    const columnWidths = new Array(colCount).fill(0);
+    for (let iter = 0; iter <= colCount; iter++) {
+      const freeIdx = [];
+      let used = 0;
+      for (let i = 0; i < colCount; i++) {
+        if (pinned[i]) used += floors[i];
+        else freeIdx.push(i);
+      }
+      if (freeIdx.length === 0) break;
+      const freeWidth = Math.max(0, CONTENT_WIDTH - used);
+      const freeTotal = freeIdx.reduce((a, i) => a + colWeights[i], 0) || 1;
+      let newlyPinned = false;
+      for (const i of freeIdx) {
+        const share = Math.floor(freeWidth * colWeights[i] / freeTotal);
+        if (share < floors[i]) {
+          pinned[i] = true;
+          columnWidths[i] = floors[i];
+          newlyPinned = true;
+        } else {
+          columnWidths[i] = share;
+        }
+      }
+      if (!newlyPinned) break;
+    }
+    // 兜底：确保每列都不低于下限、且为正整数（宽表压缩后亦成立）
+    for (let i = 0; i < colCount; i++) {
+      if (columnWidths[i] < floors[i]) columnWidths[i] = floors[i];
+      if (columnWidths[i] < 1) columnWidths[i] = 1;
+    }
+
+    // 修正舍入误差：逐列 ±1，且**只从高于下限的列回收**——
+    // 原先的实现对所有列一律 -1，会把已触底的窄列继续削薄，
+    // 使下限形同虚设（实测下限 707 被削到 509，导致标签逐字竖排）。
     let diff = CONTENT_WIDTH - columnWidths.reduce((a, b) => a + b, 0);
     let guard = Math.abs(diff) + colCount * 2;
     let ci = 0;
@@ -1035,7 +1095,7 @@ class Md2DocxConverter {
       if (diff > 0) {
         columnWidths[k] += 1;
         diff -= 1;
-      } else if (columnWidths[k] > 1) {
+      } else if (columnWidths[k] > floors[k]) {
         columnWidths[k] -= 1;
         diff += 1;
       }
