@@ -3,6 +3,8 @@
  * 全部可通过环境变量覆盖（便于 Docker 部署）
  */
 
+const fs = require('fs');
+const os = require('os');
 const path = require('path');
 
 function num(envVal, def) {
@@ -15,6 +17,61 @@ function bool(envVal, def) {
   return !['0', 'false', 'no'].includes(String(envVal).toLowerCase());
 }
 
+/**
+ * 解析数据目录，并在**首选位置不可写时自动回退**。
+ *
+ * 为什么需要回退：默认数据目录在安装目录下，而安装目录可能只读——
+ * 放到 `C:\Program Files`、企业策略限制、或从只读介质运行。
+ * 此时若不回退，`cleanupOrphans()` 的 mkdir 会以 EACCES 抛错，
+ * **服务在启动阶段直接崩溃**（用户只看到窗口一闪而过，无从排查）。
+ *
+ * 优先级：
+ *   1. 显式 DATA_DIR（用户意图明确，不做回退，失败应当暴露）
+ *   2. 安装目录下 data/          —— 便携版首选，删目录即卸载
+ *   3. 用户级数据目录            —— 只读安装时回退
+ *      Windows: %LOCALAPPDATA%\md2docx    （用户配置的标准位置）
+ *      其他:    ~/.local/share/md2docx
+ *
+ * **刻意不把临时目录作为兜底**：%TEMP% 会被系统清理，把作业数据放那里
+ * 等于静默丢数据——比启动失败更糟。全部候选都不可写时抛错并给出可操作提示。
+ */
+function resolveDataDir() {
+  if (process.env.DATA_DIR) return path.resolve(process.env.DATA_DIR);
+
+  const userDataDir = process.platform === 'win32' && process.env.LOCALAPPDATA
+    ? path.join(process.env.LOCALAPPDATA, 'md2docx')
+    : path.join(os.homedir(), '.local', 'share', 'md2docx');
+
+  const candidates = [
+    path.join(__dirname, '..', 'data'),   // 安装目录（便携首选）
+    userDataDir,                          // 用户级回退
+  ];
+
+  const failures = [];
+  for (const dir of candidates) {
+    try {
+      fs.mkdirSync(dir, { recursive: true });
+      // mkdir 成功不代表可写（目录可能已存在但只读），故实测一次写权限
+      const probe = path.join(dir, '.write-probe');
+      fs.writeFileSync(probe, 'ok', 'utf8');
+      fs.rmSync(probe, { force: true });
+      if (dir !== candidates[0]) {
+        // 回退了就要说清楚，否则用户不知道数据去哪了
+        console.warn(`[config] 安装目录不可写，数据目录改用: ${dir}`);
+      }
+      return dir;
+    } catch (e) {
+      failures.push(`${dir}（${e.code || e.message}）`);
+    }
+  }
+
+  throw new Error(
+    '找不到可写的数据目录，服务无法启动。\n'
+    + `  已尝试:\n${failures.map((f) => '    ' + f).join('\n')}\n`
+    + '  可用环境变量 DATA_DIR 显式指定一个可写目录。'
+  );
+}
+
 const config = {
   // 服务监听
   port: num(process.env.PORT, 8080),
@@ -22,10 +79,8 @@ const config = {
   // 需要局域网访问时设 HOST=0.0.0.0 并放行防火墙。
   host: process.env.HOST || '127.0.0.1',
 
-  // 数据目录（作业工作目录）
-  // 默认放在**安装目录**下而非 process.cwd()：从任意工作目录启动
-  // （快捷方式、计划任务、双击）都写到同一位置，避免产物散落各处。
-  dataDir: path.resolve(process.env.DATA_DIR || path.join(__dirname, '..', 'data')),
+  // 数据目录（作业工作目录）——见 resolveDataDir 的只读回退说明
+  dataDir: resolveDataDir(),
   get jobsDir() {
     return path.join(this.dataDir, 'jobs');
   },

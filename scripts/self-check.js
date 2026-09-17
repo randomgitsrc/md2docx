@@ -79,6 +79,22 @@ function checkEnv() {
   } catch (e) {
     fail('临时目录可写', `${tmp} — ${e.message}`);
   }
+
+  // 数据目录：安装目录只读时会自动回退到用户级目录（见 server/config.js）。
+  // 这里显式报告**实际使用**的目录，否则用户以为数据在安装目录下、
+  // 找不到产物时会困惑（回退是静默的，只在该进程启动时打一行提示）。
+  const cfg = safe(() => require('../server/config'), '加载 server/config');
+  if (cfg) {
+    const dataDir = cfg.dataDir;
+    const inInstallDir = dataDir.startsWith(ROOT);
+    out(`         数据目录: ${dataDir}`);
+    if (inInstallDir) {
+      pass('数据目录位于安装目录内', '便携用法，删除目录即卸载');
+    } else {
+      warn('数据目录已回退到安装目录之外',
+        '安装目录不可写（如放入 Program Files），作业数据将写到上述位置');
+    }
+  }
 }
 
 // ---------------------------------------------------------------- 2. 浏览器
