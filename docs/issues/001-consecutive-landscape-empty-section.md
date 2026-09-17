@@ -2,11 +2,12 @@
 
 | 项目 | 值 |
 |---|---|
-| 状态 | open |
+| 状态 | fixed（待端到端复核） |
 | 严重度 | 中 |
 | 发现日期 | 2026-09-17 |
-| 记录时 commit | `0edb265` |
-| 主要位置 | `scripts/md2docx.js`：`consumeToken()` 的 `pendingLandscapeClose` 分支、`resumePortraitSection()`、`startPortraitSection()` |
+| 记录时 commit | `0edb265`（修复前） |
+| 修复位置 | `scripts/md2docx.js`：`startPortraitSection()` / `startLandscapeSection()`（空节复用）、`convert()`（末尾空节清理） |
+| 回归用例 | `scripts/verify-sections-and-images.sh` 步骤 2 |
 
 ## 1. 现象
 
@@ -170,3 +171,70 @@ section 时手工交换了 `width`/`height`，而没有传 `orientation`；docx 
   该方案未讨论"多个横置节相邻"的情形。
 - `pendingLandscapeClose` 的既有说明见 `AGENTS.md` 已知陷阱第 3 条（只提到"无图注时遇到
   下一个非题注 token 也关"，未提及会留下空节）。
+
+## 8. 修复（已实施）
+
+改动 `scripts/md2docx.js` 三处，均为**结构性**而非补丁式：
+
+### 8.1 空节复用（`startPortraitSection` / `startLandscapeSection`）
+
+若当前 section 尚无任何内容，则**复用**它、只改朝向，不再 push 新节：
+
+```javascript
+startPortraitSection() {
+  if (this.currentSection && this.currentSection.children.length === 0) {
+    this.currentSection.orientation = 'portrait';
+    return;
+  }
+  ...
+}
+```
+
+这样"连续横置图"场景下，前一张图之后的 `resumePortraitSection()` 只是把一个空节标记为
+竖置，紧接着后一张图又把它改回横置——中间不再留下永无内容的节。
+
+### 8.2 末尾空节清理（`convert()` 收尾）
+
+```javascript
+while (this.sections.length > 0 &&
+       this.sections[this.sections.length - 1].children.length === 0) {
+  this.sections.pop();
+}
+```
+
+覆盖"文档以横置图 + 图注结尾"的场景（图注推入横置节后立刻 resume 竖置，
+之后再无 token 写入）。并加一条兜底：若整篇无正文内容，至少保留一个节，
+避免 `convert()` 返回空数组。
+
+### 8.3 为什么不做成"延迟判断"
+
+考虑过另一种方案：让 `pendingLandscapeClose` 延迟到确认"后面还有正文"时才恢复竖置。
+但那需要预读 token 流、且要区分"图注/表格/段落"多种后继，逻辑复杂；
+而"空节复用 + 收尾清理"在语义上直接表达了目标——**不产生零内容节**，
+不依赖对未来 token 的预测。
+
+## 9. 验证
+
+三份最小复现（`a-nocap.md` / `b-cap.md` / `c-tail.md`）修复前后对比：
+
+| 用例 | 修复前 | 修复后 |
+|---|---|---|
+| a 连续横置、无题注 | 7 节，中间 1 个空节 | 6 节，**0 空节**（两张图各占一横置节） |
+| b 连续横置、各带图注 | 7 节，中间 1 个空节 | 6 节，**0 空节**，图注仍随各自图片 |
+| c 单张横置 + 图注结尾 | 5 节，末尾 1 个空节 | 4 节，**0 空节** |
+
+回归：
+
+- `scripts/verify-sections-and-images.sh` 步骤 2 通过；且**已确认该断言在修复前的代码上
+  会失败**（报"出现 2 个零内容空节"），不是空转断言
+- 既有 QA 用例（`wide-table` / `caption-forms` / `crlf-test` / `bom-duplicate-key` /
+  `plantuml-no-end`）全部通过
+- `scripts/verify-stale-png.sh` PASS
+- 触发案例 `GMS-JD-SRS-V1.0.md`（1.4 MB）复跑：3 节、**0 空节**、258 图、1289 表，
+  无回归
+
+## 10. 仍未验证
+
+§6 记录的 `w:orient="portrait"` 与已交换 w/h 并存问题**未在本次改动中处理**
+（也不应由本 issue 处理）——本机无 Word/LibreOffice，无法判定 Word 实际以谁为准。
+本次改动只保证不产生空节，未触碰 `pgSz` 的写法。建议后续在有 Word 的机器上确认。

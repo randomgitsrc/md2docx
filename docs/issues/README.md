@@ -13,8 +13,8 @@
 
 | 编号 | 标题 | 严重度 | 状态 | 主要位置 |
 |---|---|---|---|---|
-| [001](001-consecutive-landscape-empty-section.md) | 连续横置图之间生成空节，多出空白页 | 中 | open | `scripts/md2docx.js` `consumeToken` / `resumePortraitSection` |
-| [002](002-pipeline-drops-local-images.md) | 完整流水线丢失作者自带的本地图片 | 高 | open | `scripts/md2docx.js` `appendImageParagraph` / `convert` |
+| [001](001-consecutive-landscape-empty-section.md) | 连续横置图之间生成空节，多出空白页 | 中 | fixed | `scripts/md2docx.js` `startPortraitSection` / `convert` 收尾 |
+| [002](002-pipeline-drops-local-images.md) | 完整流水线丢失作者自带的本地图片 | 高 | fixed（CLI）；HTTP 见 §10 | `scripts/md2docx.js` `resolveImagePath` / `imageRoot` |
 | [003](003-bare-activity-names.md) | 旧式活动图（裸写活动名）渲染失败 | 中 | fixed | `scripts/plantuml-renderer.js` `fixBareActivityNames` |
 | [004](004-missing-table-separator-row.md) | 缺分隔行的管道表格被当作普通段落 | 高 | fixed | `scripts/preprocess.js` `repairLooseTables`、`scripts/md2docx.js` `consumeTable` |
 | [005](005-table-column-width-vertical-text.md) | 表格窄列被压到逐字竖排（列宽算法缺陷） | 中 | fixed | `scripts/md2docx.js` `consumeTable` 列宽分配段 |
@@ -29,3 +29,14 @@
 - 引用代码位置以**符号名（函数 / 方法名）为主**、行号为辅——行号会随改动漂移，
   项目既有文档已因此踩过坑（见 `docs/review/review-windows-native.md` 的"行号时效性"说明）。
 - 记录行号时注明所在 commit，便于回溯。
+
+## 回归脚本
+
+| 脚本 | 覆盖 |
+|---|---|
+| `scripts/verify-sections-and-images.sh` | 缺陷 001（无空节）、002（本地图片不丢失）+ 既有 QA 用例 |
+| `scripts/verify-stale-png.sh` | 已知陷阱 12（陈旧 PNG 不得复用） |
+
+新写的断言脚本必须**在修复前的代码上验证它会失败**，否则可能是空转断言
+（`verify-sections-and-images.sh` 就踩过：步骤 2 曾因图片解析失败而"无横置节即无空节"
+假通过，已加"横置节数量/图片数量"前置校验修正）。

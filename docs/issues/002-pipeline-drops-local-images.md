@@ -2,11 +2,12 @@
 
 | 项目 | 值 |
 |---|---|
-| 状态 | open |
+| 状态 | fixed（CLI/本地路径）；HTTP 上传路径**另见 §9** |
 | 严重度 | 高 |
 | 发现日期 | 2026-09-17 |
-| 记录时 commit | `0edb265` |
-| 主要位置 | `scripts/md2docx.js`：`appendImageParagraph()`（图片解析基准）、`convert()`（`srcDir` 计算与传递）、`Md2DocxConverter` 构造函数 |
+| 记录时 commit | `0edb265`（修复前） |
+| 修复位置 | `scripts/md2docx.js`：新增 `resolveImagePath()`、`appendImageParagraph()`、`convert()` 的 `imageRoot` 透传 |
+| 回归用例 | `md/qa/local-image/` + `scripts/verify-sections-and-images.sh` 步骤 1 |
 
 ## 1. 现象
 
@@ -119,28 +120,114 @@ this.srcDir = opts.srcDir || this.inputDir;   // 第 331 行
 还决定作者自带的图片**能否出现在成品里**。记录本条后，`AGENTS.md` 该条陷阱的描述
 已不完整。
 
-## 7. HTTP 服务侧的关联（未逐一验证，需补测）
+## 7. HTTP 服务侧的关联（已在修复中实测，见 §9）
 
-`server/lib/pipeline.js` 的 `sanitizeImageRefs()` 按 `cleanDir`（=`output/clean/`）为基准
+`server/lib/pipeline.js` 的 `sanitizeImageRefs()` 按 `cleanDir`（=`clean/`）为基准
 解析并校验是否越界：
 
 ```javascript
 const resolved = path.resolve(cleanDir, decoded);
 ```
 
-若上传的 md 引用 `![](pics/diagram.png)`，该引用会因解析到作业目录之外而被判为"越界"并剔除，
-提示 `[图片引用已忽略(越界)]`。从安全设计看，剔除越界引用是**刻意的**（防路径穿越，
-见 `docs/plans/http-service.md` §H3）；但配合本 issue，即便作者把图片一并放进作业目录，
-`appendImageParagraph` 仍以 `output/clean/` 为基准解析，图片依旧找不到。
+从安全设计看，剔除越界引用是**刻意的**（防路径穿越，见 `docs/plans/http-service.md` §H3）。
+修复时必须保证新增的 `srcDir` 解析路径不会绕过这道防线——见 §8.3。
 
-**此路径我未实测**（需要起服务并构造上传），仅由代码阅读推断，置信度中等。
-补测时需确认：HTTP 方式下本地图片是否同样丢失，以及 `sanitizeImageRefs` 的基准
-与 `appendImageParagraph` 的基准不一致是否会造成"校验通过但仍找不到文件"。
+## 8. 修复（已实施）
 
-## 8. 修复时的注意点（供后续方案参考，非本记录的结论）
+### 8.1 新增 `resolveImagePath()`：多基准依次尝试
 
-- `srcDir` 的语义需先明确：它应当是"作者源文件所在目录"，还是"clean.md 所在目录"？
-  两者在直接运行与流水线下恰好相反，改错方向会让另一条路径回归失败——**两条路径都必须验证**。
-- `preprocess` 与 `convert` 现已各自独立解析路径，任何改动都需覆盖 `cli.js`、
-  `md2docx.sh`、HTTP 服务三条入口。
-- 建议补一个回归用例：md 与其图片同目录，走完整流水线后断言 DOCX 内图片数 ≥ 1。
+```javascript
+resolveImagePath(decodedSrc) {
+  const bases = [];
+  for (const b of [this.inputDir, this.srcDir]) {   // inputDir 优先
+    if (b && !bases.includes(b)) bases.push(b);
+  }
+  ...
+}
+```
+
+**顺序很关键**：`inputDir`（clean.md 所在目录）**优先**，因为 markdown 语义上图片引用
+本就相对本文档；这样 preprocess 渲染出的图表 PNG（形如 `../.mermaid/x.png`）行为与
+改动前**完全一致，零回归**。`srcDir` 只作为兜底，用于解析作者自带的
+`![](pics/x.png)`。
+
+两阶段流水线里两者必然不同（`inputDir=<源目录>/output/clean`、`srcDir=<源目录>`），
+只认其一就会出现"作者图片丢失"或"渲染图表丢失"。
+
+### 8.2 顺带修正：非法百分号编码不再抛异常
+
+原 `decodeURIComponent(src)` 遇到 `100%.png` 这类非法编码会抛 `URIError`，
+导致整篇转换失败。现包 try/catch 按原文处理。
+
+### 8.3 安全：新增 `imageRoot` 容器边界（HTTP 必需）
+
+服务端 `srcDir = jobDir`、`inputDir = jobDir/clean`。若只加 `srcDir` 解析而不设边界，
+上传的 md 写 `![](../x.png)` 会经 `srcDir` 解析到 **`jobDir` 之外**（相邻作业目录、
+乃至宿主任意文件）；而 `sanitizeImageRefs` 只按 cleanDir 基准校验，**会放行该引用**——
+等于在修复本 issue 时新开一个路径穿越口子。
+
+因此新增 `opts.imageRoot`：指定时解析结果必须落在该目录内，否则按"未找到"处理。
+CLI/本地使用不传（用户自己的文件，无隔离需求），HTTP worker 传 `jobDir`。
+
+### 8.4 未采用的做法
+
+没有把 `sanitizeImageRefs` 的校验基准一并改为 `jobDir`——那会放宽既有防线（原本
+`clean/../x.png` 会被拦，改基准后就放行了）。保持"校验用 cleanDir、解析多基准 +
+独立容器守卫"，两道防线互不削弱。
+
+## 9. 验证
+
+### 9.1 CLI / 本地路径
+
+| 运行方式 | 修复前 | 修复后 |
+|---|---|---|
+| 直接 `md2docx.js` | 嵌入 1 张 | 嵌入 1 张（无变化） |
+| 完整流水线 `cli.js` | **嵌入 0 张** | **嵌入 1 张** ✅ |
+
+新增回归用例 `md/qa/local-image/`（2 张作者图片 + 1 张 mermaid 渲染图）：
+走完整流水线后 DOCX 内 `<w:drawing>` = **3**，`[图片缺失]` 占位 0，
+证明**两类图片来源可共存**。
+
+### 9.2 安全（越界引用必须被拒）
+
+构造 `job1/clean/doc.clean.md` 引用 `../job2/secret.png`，以 HTTP 相同参数
+（`srcDir=job1`、`imageRoot=job1`）转换：
+
+```text
+[md2docx] 图片未找到: ../job2/secret.png
+          已尝试: /tmp/sec-test/job1/job2/secret.png
+嵌入图片数: 1（本目录的 mine.png）
+含 SECRET 内容: ✅ 未泄露
+```
+
+越界引用被拒、本目录图片正常嵌入。
+
+### 9.3 回归
+
+既有 QA 用例与 `verify-stale-png.sh` 全部通过；`GMS-JD-SRS-V1.0.md`
+（1.4 MB）复跑仍为 258 图 / 1289 表，无回归。
+
+## 10. HTTP 上传路径的真实缺口（新发现，未修，需产品决策）
+
+按 §7 的推断起服务实测后，发现真实情况与推断**不同、且更根本**：
+
+HTTP 接口是 `upload.single('file')`（`server/routes/convert.js`），
+**只接收一个 .md 文件**，图片资产从未被上传。实测上传上述用例后，作业目录里只有：
+
+```text
+jobs/<id>/upload.md
+jobs/<id>/clean/upload.clean.md
+jobs/<id>/docx/http-test.docx
+```
+
+没有 `pics/` —— 因此 `![架构图](pics/diagram.png)` 必然找不到，与解析基准无关。
+
+即：**HTTP 场景不是本 issue 的代码缺陷，而是 API 设计缺失**——
+没有"随 md 一起上传图片资产"的能力（如多文件上传 / zip 上传）。
+这需要产品决策（改 API 契约、前端交互、体积与安全限制），**不在本 issue 范围**。
+本 issue 的修复让"图片确实存在于合理位置"时能正常解析；HTTP 侧要让图片存在，
+需另立需求。
+
+建议后续方向（未实施）：接受 zip 上传并按安全规则解压到 `jobDir`，
+或允许 `file` 字段多选、图片放 `assets/` 子路径。
+
