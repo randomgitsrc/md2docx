@@ -599,12 +599,15 @@ function createZip(bundleDir, zipPath) {
 /**
  * 找一个能建 zip 的 bsdtar。
  * Windows 10+ 自带 C:\Windows\System32\tar.exe（bsdtar，支持 --options hdrcharset=UTF-8）。
- * GNU tar 不支持 -a 自动识别 zip，故先探测 `--version` 是否含 bsdtar/libarchive。
+ * Linux 上 `tar` 是 **GNU tar**（不能建 zip），bsdtar 由 libarchive-tools 提供，
+ * 所以两个平台都要先试 bsdtar，再用 `--version` 输出确认是 bsdtar/libarchive
+ * （只靠可执行文件名不够：某些发行版把 bsdtar 装成 /usr/bin/tar 的替代品）。
+ * 找不到时回退 adm-zip（结果正确但慢数倍，见 createZip 的说明）。
  */
 function findTar() {
   const candidates = process.platform === 'win32'
-    ? [path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'tar.exe'), 'tar']
-    : ['tar'];
+    ? [path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'tar.exe'), 'bsdtar', 'tar']
+    : ['bsdtar', 'tar'];
   for (const c of candidates) {
     try {
       if (c.includes(path.sep) && !fs.existsSync(c)) continue;

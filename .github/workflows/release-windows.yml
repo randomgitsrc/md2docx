@@ -46,6 +46,12 @@ jobs:
         # （scripts/puppeteer-config.js 会自动发现 puppeteer 缓存里的这份浏览器）
         run: npx --yes puppeteer browsers install chrome-headless-shell
 
+      - name: Install bsdtar (fast zip with UTF-8 filenames)
+        # Ubuntu 的 `tar` 是 GNU tar，不能建 zip；构建脚本会回退到 adm-zip。
+        # adm-zip 结果正确（UTF-8 flag）但要把每个文件先读进内存，实测慢数倍。
+        # libarchive-tools 提供 bsdtar（findTar() 会优先选它）。
+        run: sudo apt-get update && sudo apt-get install -y libarchive-tools
+
       - name: Build bundle + installer
         run: npm run release:win
 
