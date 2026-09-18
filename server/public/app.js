@@ -242,23 +242,46 @@ async function refreshJobsList() {
 }
 
 // ---------- 依赖健康徽标 ----------
+// 默认只把**必需项**渲染成红/绿：java / graphviz 在 core 后端下根本用不到，
+// 之前一律标红 ✗ 会让用户以为环境有问题（实测离线包启动后就是这样）。
+// 现在：必需项 ok=绿 / 缺失=红；可选且当前用不到=灰「不适用」；可选但缺失=灰「可选」。
+const DEP_NAMES = { node: 'Node', chrome: 'Chrome', plantuml: 'PlantUML', java: 'Java', graphviz: 'Graphviz' };
+
 async function refreshHealth() {
   try {
     const res = await fetch('/api/health');
     const d = await res.json();
+    const backend = d.plantumlBackend;
     for (const key of ['node', 'chrome', 'plantuml', 'java', 'graphviz']) {
       const badge = $(`#dep-${key}`);
+      if (!badge) continue;
       const dep = d.deps?.[key];
-      const nameMap = { node: 'Node', chrome: 'Chrome', plantuml: 'PlantUML', java: 'Java', graphviz: 'Graphviz' };
-      if (badge) {
-        if (dep?.ok) {
-          badge.textContent = `${nameMap[key]} ✓`;
-          badge.className = 'dep ok';
-        } else {
-          badge.textContent = `${nameMap[key]} ✗`;
-          badge.className = 'dep fail';
-        }
+      const name = DEP_NAMES[key];
+      if (!dep) { badge.className = 'dep loading'; badge.textContent = `${name} …`; continue; }
+      if (dep.ok) {
+        badge.className = 'dep ok';
+        badge.textContent = `${name} ✓`;
+        badge.title = dep.version || '';
+      } else if (dep.required) {
+        badge.className = 'dep fail';
+        badge.textContent = `${name} ✗`;
+        badge.title = dep.error || '必需依赖缺失';
+      } else if (dep.applicable === false) {
+        badge.className = 'dep na';
+        badge.textContent = `${name} 不适用`;
+        badge.title = backend === 'core'
+          ? '当前使用 @plantuml/core 后端，自带 WASM 版 Graphviz，不需要 Java/Graphviz'
+          : '当前后端用不到该依赖';
+      } else {
+        badge.className = 'dep na';
+        badge.textContent = `${name} 可选`;
+        badge.title = dep.error || '可选依赖，未安装不影响使用';
       }
+    }
+    const card = $('#deps-badges');
+    if (card) {
+      card.title = `运行时依赖状态（PlantUML 后端：${backend || '未知'}）`
+        + '；仅必需项 node/chrome/plantuml 影响可用性';
     }
   } catch (_) { /* 健康检查失败不阻塞 */ }
 }

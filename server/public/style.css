@@ -48,6 +48,8 @@ body {
 .dep.ok { border-color: #16a34a; color: #86efac; }
 .dep.fail { border-color: #ef4444; color: #fca5a5; }
 .dep.loading { border-color: #6b7280; color: #9ca3af; }
+/* 非必需依赖：不适用（core 后端下的 Java/Graphviz）或可选缺失——一律灰，不用红色 */
+.dep.na { border-color: #4b5563; color: #9ca3af; border-style: dashed; }
 
 /* ---------- 主容器 ---------- */
 .container {

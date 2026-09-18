@@ -1,0 +1,72 @@
+name: Build Windows offline bundle
+
+# 发布件必须来自 CI，而不是某个开发机的 dist/。
+# 起因见 docs/deployment/windows-offline.md §4.1：曾把 dist/ 里的旧包当成最新的发出去，
+# 那个包缺少后续 6 个提交里的 5 个缺陷修复，外观却与正确包无异。
+#
+# 产出：md2docx-win-x64.zip（免安装）+ md2docx-Setup-<ver>-win-x64.exe（一键安装器）
+#       + RELEASE-INFO.txt（含 SHA256，便于接收方校验）
+#
+# 构建闸门（脚本内置，失败即中止，不会产出坏包）：
+#   1. assertCleanTree      工作区必须干净，保证包能对应确定版本
+#   2. assertBundleContents 必需文件齐全（node.exe / 浏览器 / @plantuml/core …）
+#   3. verifyBundleCode     包内代码与源码逐字节一致
+#   4. smokeTestBundle      用包内代码与依赖真跑一次转换（图/表/中文）
+#   5. verifyZipEntryEncoding  zip 内中文名必须带 UTF-8 flag（防英文系统解压乱码）
+#   6. assertBundleBudget   体积/文件数预算（防依赖树被间接拖大）
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+        env:
+          # 依赖包内自带 chrome-headless-shell，无需 puppeteer 再下一份
+          PUPPETEER_SKIP_DOWNLOAD: 'true'
+
+      - name: Install headless Chrome
+        # 让 smokeTestBundle 真正渲染 mermaid / PlantUML，而不是降级为"跳过"
+        # （scripts/puppeteer-config.js 会自动发现 puppeteer 缓存里的这份浏览器）
+        run: npx --yes puppeteer browsers install chrome-headless-shell
+
+      - name: Build bundle + installer
+        run: npm run release:win
+
+      - name: Show release info
+        run: cat dist/RELEASE-INFO.txt
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: md2docx-win-x64
+          path: |
+            dist/md2docx-win-x64.zip
+            dist/md2docx-Setup-*-win-x64.exe
+            dist/RELEASE-INFO.txt
+
+      - name: Attach artifacts to release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/md2docx-win-x64.zip
+            dist/md2docx-Setup-*-win-x64.exe
+            dist/RELEASE-INFO.txt
+          generate_release_notes: true

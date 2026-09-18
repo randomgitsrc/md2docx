@@ -42,8 +42,38 @@ const ALLOW_DIRTY = opt('--allow-dirty');  // 允许在脏工作区构建（不�
 const TEMP = path.join(os.tmpdir(), `md2docx-bundle-${Date.now()}`);
 const KEEP_TEMP = opt('--keep-temp');
 
+/**
+ * 分发包体积/文件数预算。
+ *
+ * 为什么要有：依赖树会**悄悄**膨胀——`@mermaid-js/mermaid-zenuml` 声明了
+ * `@zenuml/core`（一个 React+Tailwind 应用），会把 react/react-dom/@headlessui/
+ * tailwindcss/@napi-rs 整套拖进来，文件数 +1.6 万、体积 +100MB，
+ * 而外观与正常包毫无差别。超限直接失败，逼人先看一眼再放行。
+ */
+const BUDGET = { maxFiles: 40000, maxBytes: 1000 * 1048576 };
+
 function log(msg) { console.log(`[bundle] ${msg}`); }
 function fail(msg) { console.error(`[bundle] 错误: ${msg}`); process.exit(1); }
+
+/**
+ * 定位 npm 的可执行方式（Windows 宿主机必需）。
+ * Windows 上 execFileSync('npm') 只会去找 npm.exe（不存在）→ ENOENT；
+ * 换成 'npm.cmd' 又会被 Node 的 CVE-2024-27980 补丁拒绝 → EINVAL。
+ * 最稳的是直接用当前 node 执行 npm 的 JS 入口：跨平台、不经 shell。
+ * 找不到时回退到 shell 方式（参数全部是写死的字面量，无注入面）。
+ */
+function resolveNpm() {
+  const nodeDir = path.dirname(process.execPath);
+  const candidates = [
+    path.join(nodeDir, 'node_modules', 'npm', 'bin', 'npm-cli.js'),
+    path.join(nodeDir, 'lib', 'node_modules', 'npm', 'bin', 'npm-cli.js'),
+  ];
+  for (const c of candidates) {
+    if (fs.existsSync(c)) return { cmd: process.execPath, prefix: [c] };
+  }
+  return { cmd: 'npm', prefix: [], shell: true };
+}
+const NPM = resolveNpm();
 
 function download(url, dest) {
   return new Promise((resolve, reject) => {
@@ -145,11 +175,12 @@ async function main() {
   for (const f of ['package.json', 'package-lock.json']) {
     fs.copyFileSync(path.join(ROOT, f), path.join(depStage, f));
   }
-  execFileSync('npm', ['ci', '--omit=dev', '--os=win32', '--cpu=x64', '--no-audit', '--no-fund'], {
+  execFileSync(NPM.cmd, [...NPM.prefix, 'ci', '--omit=dev', '--os=win32', '--cpu=x64', '--no-audit', '--no-fund'], {
     cwd: depStage,
     stdio: ['ignore', 'pipe', 'pipe'],
     env: { ...process.env, PUPPETEER_SKIP_DOWNLOAD: 'true', npm_config_cache: path.join(TEMP, 'npmcache') },
     timeout: 900000,
+    ...(NPM.shell ? { shell: true } : {}),
   });
   log(`  依赖安装完成: ${fs.readdirSync(path.join(depStage, 'node_modules')).length} 个顶层条目`);
 
@@ -321,43 +352,59 @@ async function main() {
     `构建信息：Node ${nodeVer}${chromeDir ? ' / 内置 chrome-headless-shell' : ' / 使用系统 Chrome 或 Edge'}`,
   ].join('\r\n') + '\r\n', 'utf8');
 
+  // 放入目标机自检入口（双击即出报告，便于回传定位问题）
+  addSelfCheckEntry(BUNDLE_DIR);
+
   // 构建戳已在 main 开头固定（与干净检查同一时点）
+  // 注意：stats 必须在**所有文件都写完**之后再算（含上面新增的 自检.cmd），
+  // 否则 BUILD-INFO 里的文件数与实际包不一致。
+  const bundleStats = dirStats(BUNDLE_DIR);
   fs.writeFileSync(path.join(BUNDLE_DIR, 'BUILD-INFO.txt'), [
     `构建时间: ${stamp.time}`,
     `代码版本: ${stamp.git}`,
     `Node: ${nodeVer}`,
     `浏览器: ${chromeDir ? '内置 chrome-headless-shell' : '未内置（用系统 Chrome/Edge）'}`,
     `PlantUML: @plantuml/core（core 后端，免 Java/graphviz）`,
+    `体积: ${human(bundleStats.bytes)}，${bundleStats.files} 个文件`,
     '',
     '注：本目录代码是构建时的快照；改了源码需重新运行 build-windows-bundle.js。',
   ].join('\r\n') + '\r\n', 'utf8');
 
-  // 放入目标机自检入口（双击即出报告，便于回传定位问题）
-  addSelfCheckEntry(BUNDLE_DIR);
-
   // ---- 打包前闸门：先证明这个包是对的，再打包 ----
+  assertBundleContents(BUNDLE_DIR);
   verifyBundleCode(BUNDLE_DIR);
   smokeTestBundle(BUNDLE_DIR);
 
   // ---------------------------------------------------------------- 6. 打包 zip
   log('步骤 6/6：打包 zip');
-  const AdmZip = require(path.join(ROOT, 'node_modules', 'adm-zip'));
-  const zip = new AdmZip();
-  // 手工递归加入，保证解压后顶层就是 BUNDLE_NAME 目录
-  const addDir = (dir, base) => {
-    for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
-      const p = path.join(dir, e.name);
-      const rel = `${base}/${e.name}`;
-      if (e.isDirectory()) addDir(p, rel);
-      else zip.addFile(rel, fs.readFileSync(p));
-    }
-  };
-  addDir(BUNDLE_DIR, BUNDLE_NAME);
   const zipPath = path.join(OUT_DIR, `${BUNDLE_NAME}.zip`);
-  zip.writeZip(zipPath);
+  const zipTool = createZip(BUNDLE_DIR, zipPath);
 
-  const stats = dirStats(BUNDLE_DIR);
+  const stats = bundleStats;
   const zipSize = fs.statSync(zipPath).size;
+  const zipSha256 = sha256File(zipPath);
+  const zipEntries = countZipEntries(zipPath);
+
+  // ---- 打包后闸门：证明这个 zip 是可用的（不是"打完就算完"） ----
+  verifyZipEntryEncoding(zipPath);
+  assertBundleBudget(stats);
+
+  // 发布信息（放在 zip 旁边，不进包——包内文件必须先于打包定稿）
+  fs.writeFileSync(path.join(OUT_DIR, 'RELEASE-INFO.txt'), [
+    `构建时间: ${stamp.time}`,
+    `代码版本: ${stamp.git}`,
+    `Node: ${nodeVer}`,
+    `浏览器: ${chromeDir ? '内置 chrome-headless-shell' : '未内置（用系统 Chrome/Edge）'}`,
+    `打包工具: ${zipTool}`,
+    '',
+    `目录: ${BUNDLE_NAME}/  (${human(stats.bytes)}, ${stats.files} 个文件)`,
+    `压缩: ${BUNDLE_NAME}.zip  (${human(zipSize)}, ${zipEntries} 个条目)`,
+    `SHA256: ${zipSha256}`,
+    '',
+    '校验（发给别人前后都可自查）：',
+    '  Windows: certutil -hashfile md2docx-win-x64.zip SHA256',
+    '  Linux:   sha256sum md2docx-win-x64.zip',
+  ].join('\r\n') + '\r\n', 'utf8');
 
   // 可选：一键安装器（EXE）
   let installer = null;
@@ -367,12 +414,206 @@ async function main() {
   log('');
   log('=== 完成 ===');
   log(`  目录: ${BUNDLE_DIR}  (${human(stats.bytes)}, ${stats.files} 个文件)`);
-  log(`  压缩: ${zipPath}  (${human(zipSize)})`);
+  log(`  压缩: ${zipPath}  (${human(zipSize)}, ${zipEntries} 个条目, ${zipTool})`);
+  log(`  SHA256: ${zipSha256}`);
   if (installer) log(`  安装器: ${installer.path}  (${human(installer.size)})`);
   log(`  代码版本: ${stamp.git} @ ${stamp.time}`);
   log(`  目标机：解压 → 双击「启动 md2docx.cmd」→ 浏览器自动打开`);
   log(`  排障用：目标机双击「自检.cmd」可产出可回传的自检报告`);
 
+
+// ---------------------------------------------------------------- 通用工具
+
+function sha256File(p) {
+  const crypto = require('crypto');
+  return crypto.createHash('sha256').update(fs.readFileSync(p)).digest('hex');
+}
+
+/** 数一下 zip 中央目录条目数（顺带验证中央目录可解析） */
+function countZipEntries(zipPath) {
+  return scanZipEntries(zipPath).total;
+}
+
+/**
+ * 扫描 zip 中央目录条目。
+ * 中央目录每条固定头 46 字节，偏移 8 是 general purpose bit flag，
+ * 偏移 28 是文件名长度——不需要额外依赖即可断言编码。
+ */
+function scanZipEntries(zipPath) {
+  const buf = fs.readFileSync(zipPath);
+  const SIG = Buffer.from([0x50, 0x4b, 0x01, 0x02]);   // PK\x01\x02
+  const entries = [];
+  let i = 0;
+  while ((i = buf.indexOf(SIG, i)) !== -1) {
+    const flags = buf.readUInt16LE(i + 8);
+    const nameLen = buf.readUInt16LE(i + 28);
+    if (i + 46 + nameLen > buf.length) break;
+    const raw = buf.slice(i + 46, i + 46 + nameLen);
+    entries.push({
+      utf8Flag: (flags & 0x800) !== 0,
+      raw,
+      // latin1 逐字节映射，>0x7F 即为非 ASCII 名
+      nonAscii: /[^\x00-\x7F]/.test(raw.toString('latin1')),
+    });
+    i += 46;
+  }
+  return { total: entries.length, entries };
+}
+
+// ---------------------------------------------------------------- 打包/发布闸门
+
+/**
+ * 打包前：确认运行必需的文件真的都在包里。
+ * 这道闸门防的是"少拷了一层目录"这类低级但致命的错误——
+ * 例如漏了 chrome-headless-shell，目标机上所有图表静默降级为代码块。
+ */
+function assertBundleContents(bundleDir) {
+  log('附加步骤：校验包内必需文件齐全');
+  const required = [
+    'node.exe',
+    '启动 md2docx.cmd',
+    '转换文档.cmd',
+    '自检.cmd',
+    '使用说明.txt',
+    'BUILD-INFO.txt',
+    'package.json',
+    'scripts/cli.js',
+    'scripts/self-check.js',
+    'scripts/md2docx.js',
+    'scripts/preprocess.js',
+    'scripts/puppeteer-config.js',
+    'server/app.js',
+    'node_modules/docx/package.json',
+    'node_modules/@plantuml/core/plantuml.js',
+    'node_modules/@plantuml/core/viz-global.js',
+    'node_modules/@mermaid-js/mermaid-cli/src/cli.js',
+    'node_modules/@mermaid-js/mermaid-zenuml/dist/mermaid-zenuml.esm.mjs',
+    'node_modules/puppeteer-core/package.json',
+  ];
+  if (!SKIP_CHROMIUM) required.push('chrome-headless-shell/chrome-headless-shell.exe');
+
+  const missing = required.filter((rel) => !fs.existsSync(path.join(bundleDir, rel)));
+  if (missing.length > 0) {
+    fail(`包内缺少必需文件（${missing.length} 个）：\n`
+      + missing.map((m) => '    ' + m).join('\n'));
+  }
+  log(`  齐全（检查 ${required.length} 项）`);
+}
+
+/**
+ * 打包前：体积/文件数预算断言。见 BUDGET 的说明。
+ */
+function assertBundleBudget(stats) {
+  const mb = stats.bytes / 1048576;
+  if (stats.files > BUDGET.maxFiles || stats.bytes > BUDGET.maxBytes) {
+    fail(`分发包超出预算：${mb.toFixed(1)}MB / ${stats.files} 个文件`
+      + `（上限 ${(BUDGET.maxBytes / 1048576).toFixed(0)}MB / ${BUDGET.maxFiles} 个文件）。\n`
+      + '  常见原因：依赖树被间接拖大（如 @zenuml/core 带进整套 React/Tailwind）。\n'
+      + '  确属需要请调高 scripts/build-windows-bundle.js 顶部的 BUDGET。');
+  }
+  log(`  体积预算：${mb.toFixed(1)}MB / ${stats.files} 个文件（上限 `
+    + `${(BUDGET.maxBytes / 1048576).toFixed(0)}MB / ${BUDGET.maxFiles}）`);
+}
+
+/**
+ * 打包后：断言 zip 内非 ASCII 条目名带 UTF-8 flag。
+ *
+ * 起因：Windows 自带的 bsdtar 默认按**系统 ANSI 代码页**（中文机器为 GBK）
+ * 写文件名且不置 UTF-8 flag。这种包在中文 Windows 上正常、在英文 Windows 上
+ * 解压出来就是乱码 `ʹ��˵��.txt`——而且**外观与正确包完全一样**，
+ * 只有到别人机器上解压才暴露。故在打包后立刻用字节级检查把它拦下。
+ */
+function verifyZipEntryEncoding(zipPath) {
+  log('附加步骤：校验 zip 条目编码（中文名须带 UTF-8 flag）');
+  const { total, entries } = scanZipEntries(zipPath);
+  if (total === 0) fail(`zip 中央目录为空或无法解析：${zipPath}`);
+
+  const nonAscii = entries.filter((e) => e.nonAscii);
+  if (nonAscii.length === 0) {
+    fail('zip 内没有任何非 ASCII 条目名——中文入口（启动 md2docx.cmd 等）疑似丢失');
+  }
+  const bad = nonAscii.filter((e) => !e.utf8Flag || e.raw.toString('utf8').includes('\uFFFD'));
+  if (bad.length > 0) {
+    fail(`zip 条目编码错误（${bad.length}/${nonAscii.length} 个中文名缺 UTF-8 flag）：\n`
+      + bad.slice(0, 5).map((b) => `    utf8flag=${b.utf8Flag} bytes=${b.raw.toString('hex')}`).join('\n')
+      + '\n  这类包在非中文 Windows 上解压会得到乱码文件名。\n'
+      + '  请使用支持 UTF-8 的打包方式（bsdtar 需加 --options hdrcharset=UTF-8）。');
+  }
+  log(`  通过：${total} 个条目，非 ASCII 名 ${nonAscii.length} 个，均带 UTF-8 flag`);
+}
+
+/**
+ * 打包：优先用系统 bsdtar（streaming，快且内存平稳），缺失则回退 adm-zip。
+ *
+ * 为什么优先 bsdtar：adm-zip 需要把**每个文件先读进内存**再压缩，
+ * 2.3 万个文件 / 535MB 时 GC 压力极大——实测读 1.4 万文件就花了 356s
+ * 且越来越慢，整包 20 分钟以上，看起来像卡死。bsdtar 同样内容约 6 分钟、
+ * 内存平稳。
+ *
+ * 注意 bsdtar 必须显式 hdrcharset=UTF-8，否则中文名按系统代码页写（见
+ * verifyZipEntryEncoding 的说明）。
+ */
+function createZip(bundleDir, zipPath) {
+  const parent = path.dirname(bundleDir);
+  const base = path.basename(bundleDir);
+  fs.rmSync(zipPath, { force: true });
+
+  const tar = findTar();
+  if (tar) {
+    try {
+      execFileSync(tar, ['-a', '-c', '-f', zipPath, '--options', 'hdrcharset=UTF-8', '-C', parent, base], {
+        stdio: ['ignore', 'pipe', 'pipe'], timeout: 3600000,
+      });
+      if (fs.existsSync(zipPath) && fs.statSync(zipPath).size > 0) {
+        return `bsdtar (${path.basename(tar)})`;
+      }
+      log('  ⚠ bsdtar 未产出 zip，回退 adm-zip');
+    } catch (e) {
+      const msg = (e.stderr || e.stdout || '').toString().trim().split('\n').slice(-2).join(' | ');
+      log(`  ⚠ bsdtar 打包失败（${msg || e.message}），回退 adm-zip`);
+    }
+  } else {
+    log('  ⚠ 未找到可用的 tar（bsdtar），回退 adm-zip（较慢，且内存占用高）');
+  }
+
+  // 回退路径：adm-zip（UTF-8 flag 由它自己置，语义正确）
+  const AdmZip = require(path.join(ROOT, 'node_modules', 'adm-zip'));
+  const zip = new AdmZip();
+  let n = 0;
+  const addDir = (dir, base_) => {
+    for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+      const p = path.join(dir, e.name);
+      const rel = `${base_}/${e.name}`;
+      if (e.isDirectory()) addDir(p, rel);
+      else {
+        zip.addFile(rel, fs.readFileSync(p));
+        if (++n % 5000 === 0) log(`    已加入 ${n} 个文件…`);
+      }
+    }
+  };
+  addDir(bundleDir, base);
+  zip.writeZip(zipPath);
+  return 'adm-zip';
+}
+
+/**
+ * 找一个能建 zip 的 bsdtar。
+ * Windows 10+ 自带 C:\Windows\System32\tar.exe（bsdtar，支持 --options hdrcharset=UTF-8）。
+ * GNU tar 不支持 -a 自动识别 zip，故先探测 `--version` 是否含 bsdtar/libarchive。
+ */
+function findTar() {
+  const candidates = process.platform === 'win32'
+    ? [path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'tar.exe'), 'tar']
+    : ['tar'];
+  for (const c of candidates) {
+    try {
+      if (c.includes(path.sep) && !fs.existsSync(c)) continue;
+      const v = execFileSync(c, ['--version'], { stdio: 'pipe', timeout: 15000 }).toString();
+      if (/bsdtar|libarchive/i.test(v)) return c;
+    } catch (_) { /* 试下一个 */ }
+  }
+  return null;
+}
 
 /**
  * 构建前：确认代码状态可追溯。
@@ -512,6 +753,17 @@ async function ensureMakensis() {
     execFileSync('makensis', ['-VERSION'], { stdio: 'pipe' });
     return { bin: 'makensis', dir: process.env.NSISDIR || null };
   } catch (_) { /* 继续 */ }
+
+  // Windows 宿主：下面的本地解包走的是 Ubuntu 归档的 .deb + dpkg-deb，
+  // 在 Windows 上必然失败（只会白下载两个 deb 再报"跳过"）。这里直接收口，
+  // 给出可操作的提示，而不是让用户看着一段无意义的失败日志。
+  if (process.platform === 'win32') {
+    log('  ⚠ 未找到 makensis（NSIS）。Windows 上请先安装 NSIS：');
+    log('      winget install NSIS.NSIS   或   https://nsis.sourceforge.io/Download');
+    log('    也可在 Linux 上构建（构建脚本会自动下载并本地解包 NSIS）。');
+    log('  → 跳过安装器生成（zip 免安装包不受影响）');
+    return null;
+  }
 
   // 2) 本地解包（Ubuntu 归档的 nsis + nsis-common 两个 deb）
   // 优先 https；部分镜像只提供 http，download() 已支持两种协议

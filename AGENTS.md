@@ -22,7 +22,11 @@ node server/app.js                                     # 启动服务（默认 h
 PORT=8080 MAX_CONCURRENT=2 node server/app.js           # 可选环境变量（见 server/config.js）
 
 # Windows 完全离线包（在有网机器上跑一次；详见 docs/deployment/windows-offline.md）
-node scripts/build-windows-bundle.js                   # → dist/md2docx-win-x64{,.zip}
+npm run build:win                                      # → dist/md2docx-win-x64{,.zip} + RELEASE-INFO.txt
+npm run release:win                                    # 同上，额外产出 Windows 一键安装器 EXE
+node scripts/build-windows-bundle.js                   # 等价命令（--installer / --skip-chromium / --allow-dirty）
+
+# 发布件必须来自 CI，不能手工发 dist/（见 .github/workflows/release-windows.yml）
 ```
 
 产物目录（均已被 .gitignore 忽略，勿提交）：
@@ -97,6 +101,15 @@ md2docx 转换时，mermaid 与 PlantUML 图表**默认注入灰阶/黑白主题
     `宽高比 > 2.0`），该阈值按 jar 版原生输出尺寸校准。core 后端若用 scale=2，像素翻倍会让
     擦线图被误判为横置 → 改变分节与页码。scale=1 时 core 与 jar 尺寸基本一致
     （实测 177x206 vs 175x205）。
+16. **zip 内中文文件名必须带 UTF-8 flag**：Windows 自带 bsdtar 默认按**系统 ANSI 代码页**
+    （中文机器 = GBK）写条目名且**不置 bit 11**。这种包在中文 Windows 上解压正常、在英文
+    Windows 上解压出 `ʹ��˵��.txt` 这类乱码，而外观与正确包完全一样——只有到别人机器上才
+    暴露。故打包一律走 `verifyZipEntryEncoding` 闸门，且 bsdtar 必须带
+    `--options hdrcharset=UTF-8`。`adm-zip` 编码语义正确（UTF-8 + flag），但需把每个文件
+    读进内存，2.3 万文件时 20 分钟以上（bsdtar 约 6 分钟），故仅作回退。
+17. **构建机若为 Windows，`execFileSync('npm', …)` 必失败**：`'npm'` 会去找不存在的
+    `npm.exe`（ENOENT），`'npm.cmd'` 又被 Node 的 CVE-2024-27980 补丁拒绝（EINVAL）。
+    必须用 `process.execPath` 直接执行 npm 的 `npm-cli.js`（见 `resolveNpm()`）。
 
 ## 工作流程：计划 → 评审 → 实施
 
@@ -138,10 +151,12 @@ md2docx 转换时，mermaid 与 PlantUML 图表**默认注入灰阶/黑白主题
      `core` = `@plantuml/core`（TeaVM 版，自带 WASM 版真 Graphviz）——**免 Java、免 graphviz**；
      `jar` = `java -jar plantuml.jar`（需 `java`，`graphviz` 可选/可被 Smetana 替代）。
    - **已移除**：`python3` + `python-docx`——分页属性改由 docx 库原生输出（见「已知陷阱」第 4 条）。
-   - 缺依赖时图表降级为代码块，不报致命错误。`/api/health` 的 `status` 只看必需项。
+   - 缺依赖时图表降级为代码块，不报致命错误。`/api/health` 的 `status` 只看必需项
+     （`requiredKeys` = node/chrome/plantuml）。`java`/`graphviz` 是**可选**依赖，且带
+     `applicable` 标记——core 后端下为 `false`，界面/调用方应显示为「不适用」而**不是红色 ✗**。
 5. mmdc 统一走 `exec-util.runMmdc()`（`node <mermaid-cli>/src/cli.js` + 参数数组，不经 shell，也不走 `npx`）——不要改回 `npx mmdc` 或模板字符串拼命令，原因见「已知陷阱」第 11 条。
-6. HTTP 服务：`node server/app.js` 起服务；`curl /api/health` 应返回全部依赖 ✓。前端 E2E 需本机 Chrome CDP：`NODE_PATH=$(npm root -g) node scripts/e2e-web.js`；无 CDP 环境时用 curl 走 API 全流程代替（见 `docs/api.md`）。
-7. 离线包：构建后**必须做依赖完整性冒烟**——用包内 `node_modules` 跑一次
-   `scripts/cli.js`（Linux 上可临时用 `PUPPETEER_EXECUTABLE_PATH` 指向本机浏览器），
-   确认 mermaid/PlantUML 均渲染、docx 产出正常，避免"只能构建不能运行"。
-   Windows 真机待确认项（图内中文是否变方块等）见 `docs/plans/windows-native.md` §7。
+6. HTTP 服务：`node server/app.js` 起服务；`curl /api/health` 应返回必需项全 ✓（java/graphviz 为「不适用/可选」属正常）。前端 E2E 需本机 Chrome CDP：`NODE_PATH=$(npm root -g) node scripts/e2e-web.js`；无 CDP 环境时用 curl 走 API 全流程代替（见 `docs/api.md`）。
+7. 离线包：`npm run build:win`。脚本内置 6 道闸门（干净工作区 / 必需文件齐全 / 包内代码
+   逐字节一致 / 包自检真跑一次转换 / zip 中文名 UTF-8 flag / 体积预算），**构建通过即代表
+   核心链路可用**，不必再手工跑冒烟。产物校验和见 `dist/RELEASE-INFO.txt`。
+   真机验证状态见 `docs/deployment/windows-offline.md` §7（Windows 核心链路已实测通过）。

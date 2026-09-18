@@ -81,13 +81,18 @@
 10. ☑ **端口自动探测**（`server/app.js`）
    8080 被占则向后找空闲端口，并把实际 URL 写入 `data/server-url.txt`；
     可选 `MD2DOCX_OPEN_BROWSER=1` 自动开浏览器。
-11. ☐ **接入 `@plantuml/core` 作为 PlantUML 渲染后端**（本次选型核心）
+11. ☑ **接入 `@plantuml/core` 作为 PlantUML 渲染后端**（本次选型核心）
     在已有 puppeteer/Chromium 中加载 `plantuml.js` + `viz-global.js` 渲染 SVG，
     再截图为 PNG。需保留 jar 后端作为回退（`PLANTUML_BACKEND=core|jar`）。
-12. ☐ **Windows CLI 入口**：`md2docx.sh` 是 bash，需提供 `md2docx.cmd`/`.ps1`
-    或纯 Node 入口（推荐后者，跨平台一套逻辑）。
-13. ☐ **纯 JS 分页后处理**（仅当仍需回退层时）：`python-docx` 那段逻辑可用纯 JS
-    操作 zip 内 XML 复刻，但**不再需要**——原生属性已等价（见第 4 项）。
+12. ☑ **Windows CLI 入口**：`md2docx.sh` 是 bash，需提供 `md2docx.cmd`/`.ps1`
+    或纯 Node 入口（推荐后者，跨平台一套逻辑）→ `scripts/cli.js`
+13. ☑ **纯 JS 分页后处理**（仅当仍需回退层时）：`python-docx` 那段逻辑可用纯 JS
+    操作 zip 内 XML 复刻，但**不再需要**——原生属性已等价（见第 4 项）
+14. ☑ **构建机 Windows 兼容**：`execFileSync('npm')` 在 Windows 上必失败
+    （`'npm'`→找 `npm.exe` ENOENT；`'npm.cmd'`→被 CVE-2024-27980 补丁拒 EINVAL），
+    改为 `process.execPath` 直接执行 `npm-cli.js`
+15. ☑ **打包改用 bsdtar**（`hdrcharset=UTF-8`），adm-zip 降为回退：
+    adm-zip 需先把每个文件读进内存，2.3 万文件时 20 分钟以上；bsdtar 约 6 分钟
 
 ## 4. 打包形态（**推荐形态 B**）
 
@@ -131,12 +136,13 @@
 | 路径含空格/中文使渲染失败 | ☑ 已修 + 回归 | 见 §3.1；回归覆盖两种路径 |
 | `@plantuml/core` 版式差异翻转横置判定 | ☑ 已实测 0 处翻转 | 改版式/升级该包后**必须重跑** 23 图比对（方法见下） |
 | `@plantuml/core` 的 `skinparam defaultFontName` | ☑ 已实测生效 | 字体名写入 SVG，由系统字体渲染；Windows 用微软雅黑/宋体 |
-| **Windows 上中文是否变方块** | ☐ 需真机确认 | 本机 Linux 已验证 `@plantuml/core` 中文正常；Windows 字体名不同，需真机逐张目检 |
-| 目标机缺 `VCRUNTIME140.dll` 等运行库 | ☐ 需真机确认 | 用 `@plantuml/core` 路线已规避（不再有原生 exe）；便携 node.exe 自带依赖 |
-| 系统 Edge 缺失（企业精简镜像） | ☐ 决策 | 建议**自带 chrome-headless-shell** 换取完全自包含 |
+| **Windows 上中文是否变方块** | ☑ **真机实测正常** | 2026-09 在 Windows 上逐图目视确认 PlantUML + mermaid 中文均正常 |
+| 目标机缺 `VCRUNTIME140.dll` 等运行库 | ☑ 已规避 | 用 `@plantuml/core` 路线（不再有原生 exe）；便携 node.exe 自带依赖 |
+| 系统 Edge 缺失（企业精简镜像） | ☑ 决策：自带 | 打包 `chrome-headless-shell` 换取完全自包含（+230MB） |
 | 杀软误报 | ☐ | 免安装 zip 可降低；必要时代码签名 |
 | 长路径 / 中文路径 | ☑ 部分覆盖 | 已测 `测试 目录 带空格/中文.md`；仍需测超长路径（>260） |
-| 中文上传文件名 mojibake | ☐ 待修 | 评审实测 `测试文档.md` → `æµè‹ææ¡£.md`（multipart 文件名编码） |
+| 中文上传文件名 mojibake | ☑ **真机实测正常** | 上传 `综合测试 文档.md` → `originalName` 与下载名均正确 |
+| zip 内中文文件名乱码（英文系统） | ☑ 已加闸门 | bsdtar 必须 `--options hdrcharset=UTF-8`；`verifyZipEntryEncoding` 拦住无 flag 的包 |
 | `tmpDir` 从不清理 | ☐ 待修 | 长期运行会积累临时文件 |
 
 **横置判定回归方法**（改 PlantUML 后端或升级版本后必做）：
@@ -156,21 +162,29 @@
 7. ☑ Windows CLI 入口 `scripts/cli.js`（纯 Node，跨平台一套逻辑）
 8. ☑ 离线包组装 `scripts/build-windows-bundle.js` → 534.8MB 目录 / 213.3MB zip，
    含启动脚本与使用说明
-9. ☐ **Windows 真机实测**（见 §7）——唯一剩余的关键步骤
+9. ☑ **Windows 真机实测**（见 §7）——核心链路已全部验证通过，剩余项见 §7
 10. ☑ 文档：`docs/deployment/windows-offline.md`（构建、分发、使用、卸载、验证清单）
+11. ☑ 构建/发布流程固化：`npm run build:win` / `release:win`、
+    `.github/workflows/release-windows.yml`（CI 出包挂 Release）、`RELEASE-INFO.txt`（含 SHA256）
 
 ## 7. 验证清单（Windows 真机）
 
-- [ ] 目标机**断网**状态下，解压/安装后即可使用（无任何联网请求）
-- [ ] 双击启动 → 浏览器自动打开 → 页面可用
-- [ ] `/api/health` 必需项全 ✓（node / chrome / plantuml）
-- [ ] 转换用户真实文档：PlantUML **23/23**、题注 **540 全居中**、宽表不崩
-- [ ] **图表中文无方块**（Windows 字体名与 Linux 不同，重点目检）
-- [ ] 路径含空格与中文（`C:\用户\我的 文档\`）正常
-- [ ] CLI 批量转换可用
-- [ ] 端口被占时自动换端口且浏览器仍能打开
-- [ ] 不污染系统：不改 PATH、无需预装 Node/Java/Python/graphviz
-- [ ] 卸载/删除目录后无残留（无服务、无自启项、无注册表残留）
+2026-09 在 Windows 真机上实测结果：
+
+- [x] 解压后即可使用（无需预装 Node/Java/Python/graphviz/Chrome）
+- [x] 双击启动 → 浏览器自动打开 → 页面可用
+- [x] `/api/health` 必需项全 ✓（node / chrome / plantuml）；`status: ok`
+- [x] 端到端转换：PlantUML **23/23**、表格与题注正常、宽表不崩
+- [x] **图表中文无方块**（目视确认）
+- [x] 路径含空格与中文（`...\md2docx 离线 测试\`）正常
+- [x] CLI 批量转换可用（中文+空格路径）
+- [x] 端口被占时自动换端口且浏览器仍能打开（实测 8080→8081）
+- [x] 不污染系统：不改 PATH、无需预装任何运行时
+- [x] 上传/下载中文文件名无乱码
+- [ ] 目标机**断网**状态下全流程可用（无任何联网请求）
+- [ ] 杀软是否拦截
+- [ ] 超长路径（>260 字符）
+- [ ] 删除目录后无残留（无服务、无自启项、无注册表残留）
 
 ## 8. 与 Docker 路线的关系
 

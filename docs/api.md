@@ -18,18 +18,35 @@ Base URL：`http://<host>:<port>`（默认 `http://127.0.0.1:8080`）
 {
   "status": "ok",
   "uptimeSec": 123,
+  "requiredKeys": ["node", "chrome", "plantuml"],
+  "optionalKeys": ["java", "graphviz"],
+  "plantumlBackend": "core",
   "deps": {
-    "node":       { "ok": true, "version": "v24.15.0" },
-    "chrome":     { "ok": true, "version": "chrome-headless-shell" },
-    "java":       { "ok": true, "version": "openjdk version ..." },
-    "graphviz":   { "ok": true, "version": "dot - graphviz version ..." },
-    "python":     { "ok": true, "version": "Python 3.12.3" },
-    "pythonDocx": { "ok": true, "version": "installed" }
+    "node":     { "ok": true, "version": "v22.23.2", "required": true,  "applicable": true },
+    "chrome":   { "ok": true, "version": "chrome-headless-shell.exe", "required": true, "applicable": true },
+    "plantuml": { "ok": true, "version": "core（免 Java/graphviz）", "required": true, "applicable": true },
+    "java":     { "ok": false, "required": false, "applicable": false, "error": "..." },
+    "graphviz": { "ok": false, "required": false, "applicable": false, "error": "..." }
   }
 }
 ```
 
-任一依赖缺失时 `status` 为 `degraded`，对应依赖 `ok: false`（图表仍会降级为代码块，不致命）。
+依赖分两档：
+
+| 档 | 键 | 缺失后果 |
+|---|---|---|
+| **必需** | `node` / `chrome` / `plantuml` | `status` 变 `degraded`，图表降级为代码块 |
+| **可选** | `java` / `graphviz` | 无影响 |
+
+每条依赖带两个标记，供界面正确着色：
+
+- `required` — 是否必需。仅必需项缺失才应显示为红色 `✗`
+- `applicable` — 当前 PlantUML 后端是否用得到它。`plantumlBackend` 为 `core` 时
+  `java` / `graphviz` 均为 `applicable: false`（core 后端自带 WASM 版 Graphviz，
+  免 Java），界面应显示为灰色「不适用」
+
+> 注意：`python` / `pythonDocx` 已不再是依赖——分页属性（`cantSplit`/`keepNext`/`keepLines`）
+> 改由 `docx` 库原生输出，不再需要 python-docx。
 
 ## 2. 提交转换作业
 
